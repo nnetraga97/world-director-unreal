@@ -24,17 +24,17 @@
 
 namespace
 {
-const FLinearColor TextPrimary(0.90f, 0.92f, 0.92f);
-const FLinearColor TextSecondary(0.67f, 0.71f, 0.74f);
-const FLinearColor TextMuted(0.49f, 0.54f, 0.58f);
-const FLinearColor AccentBlue(0.34f, 0.76f, 0.98f);
-const FLinearColor AccentGreen(0.38f, 0.79f, 0.52f);
-const FLinearColor AccentAmber(0.92f, 0.68f, 0.30f);
-const FLinearColor AccentRed(0.93f, 0.37f, 0.34f);
+const FLinearColor DiagTextPrimary(0.90f, 0.92f, 0.92f);
+const FLinearColor DiagTextSecondary(0.67f, 0.71f, 0.74f);
+const FLinearColor DiagTextMuted(0.49f, 0.54f, 0.58f);
+const FLinearColor DiagAccentBlue(0.34f, 0.76f, 0.98f);
+const FLinearColor DiagAccentGreen(0.38f, 0.79f, 0.52f);
+const FLinearColor DiagAccentAmber(0.92f, 0.68f, 0.30f);
+const FLinearColor DiagAccentRed(0.93f, 0.37f, 0.34f);
 const FLinearColor ButtonIdle(0.10f, 0.13f, 0.15f);
 const FLinearColor ButtonActive(0.09f, 0.33f, 0.47f);
 
-UTextBlock* AddText(
+UTextBlock* DiagAddText(
 	UWidgetTree* Tree,
 	UVerticalBox* Layout,
 	const FString& Text,
@@ -64,7 +64,7 @@ UButton* MakeButton(UWidgetTree* Tree, const FString& Label)
 	UTextBlock* Text = Tree->ConstructWidget<UTextBlock>();
 	Text->SetText(FText::FromString(Label));
 	Text->SetFont(FSlateFontInfo(FCoreStyle::GetDefaultFont(), 12));
-	Text->SetColorAndOpacity(FSlateColor(TextPrimary));
+	Text->SetColorAndOpacity(FSlateColor(DiagTextPrimary));
 	Text->SetJustification(ETextJustify::Center);
 	Padding->SetContent(Text);
 	Button->SetContent(Padding);
@@ -156,14 +156,14 @@ FLinearColor GenerationAccent(const EWorldDirectorGenerationStage Stage, const b
 {
 	if (Stage == EWorldDirectorGenerationStage::Completed)
 	{
-		return AccentGreen;
+		return DiagAccentGreen;
 	}
 	if (Stage == EWorldDirectorGenerationStage::Failed ||
 		Stage == EWorldDirectorGenerationStage::Cancelled)
 	{
-		return AccentRed;
+		return DiagAccentRed;
 	}
-	return bRunning ? AccentBlue : AccentAmber;
+	return bRunning ? DiagAccentBlue : DiagAccentAmber;
 }
 }
 
@@ -220,22 +220,22 @@ void UWorldDirectorGenerationDiagnosticsWidget::BuildWidgetTree()
 	UVerticalBox* Layout = WidgetTree->ConstructWidget<UVerticalBox>();
 	Panel->SetContent(Layout);
 
-	AddText(WidgetTree, Layout, TEXT("WORLD DIRECTOR"), 12, AccentBlue);
-	AddText(WidgetTree, Layout, TEXT("AI generation diagnostics"), 27, TextPrimary,
+	DiagAddText(WidgetTree, Layout, TEXT("WORLD DIRECTOR"), 12, DiagAccentBlue);
+	DiagAddText(WidgetTree, Layout, TEXT("AI generation diagnostics"), 27, DiagTextPrimary,
 		FMargin(0.0f, 2.0f, 0.0f, 0.0f));
-	AddText(WidgetTree, Layout,
+	DiagAddText(WidgetTree, Layout,
 		TEXT("Inspect run state, stage timing, prompts, responses, token usage, validation repairs, and resolved-world artifacts. Hidden chain-of-thought is neither available nor recorded."),
-		13, TextSecondary, FMargin(0.0f, 6.0f, 0.0f, 12.0f));
+		13, DiagTextSecondary, FMargin(0.0f, 6.0f, 0.0f, 12.0f));
 
 	UBorder* RunCard = AddCard(WidgetTree, Layout, FMargin(0.0f, 0.0f, 0.0f, 10.0f));
 	UVerticalBox* RunLayout = WidgetTree->ConstructWidget<UVerticalBox>();
 	RunCard->SetContent(RunLayout);
-	AddText(WidgetTree, RunLayout, TEXT("RUN OVERVIEW"), 12, AccentBlue);
-	RunMetadataText = AddText(WidgetTree, RunLayout, TEXT("No run data available yet."), 12, TextSecondary,
+	DiagAddText(WidgetTree, RunLayout, TEXT("RUN OVERVIEW"), 12, DiagAccentBlue);
+	RunMetadataText = DiagAddText(WidgetTree, RunLayout, TEXT("No run data available yet."), 12, DiagTextSecondary,
 		FMargin(0.0f, 5.0f, 0.0f, 8.0f));
 	RunProgress = WidgetTree->ConstructWidget<UProgressBar>();
 	RunProgress->SetPercent(0.0f);
-	RunProgress->SetFillColorAndOpacity(AccentBlue);
+	RunProgress->SetFillColorAndOpacity(DiagAccentBlue);
 	RunLayout->AddChildToVerticalBox(RunProgress);
 
 	UBorder* StageCard = AddCard(WidgetTree, Layout, FMargin(0.0f, 0.0f, 0.0f, 10.0f));
@@ -249,15 +249,15 @@ void UWorldDirectorGenerationDiagnosticsWidget::BuildWidgetTree()
 	NextStageButton = AddButton(WidgetTree, StageNavigation, TEXT("Next stage"));
 	NextStageButton->SetToolTipText(FText::FromString(TEXT("Select the next recorded stage (Ctrl+Right).")));
 	NextStageButton->OnClicked.AddDynamic(this, &UWorldDirectorGenerationDiagnosticsWidget::NextStage);
-	StageMetadataText = AddText(
+	StageMetadataText = DiagAddText(
 		WidgetTree,
 		StageLayout,
 		TEXT("No AI stage has been recorded."),
 		12,
-		TextSecondary,
+		DiagTextSecondary,
 		FMargin(0.0f, 9.0f, 0.0f, 0.0f));
 
-	AddText(WidgetTree, Layout, TEXT("RUN VIEWS"), 11, TextMuted,
+	DiagAddText(WidgetTree, Layout, TEXT("RUN VIEWS"), 11, DiagTextMuted,
 		FMargin(0.0f, 2.0f, 0.0f, 5.0f));
 	UWrapBox* RunViews = WidgetTree->ConstructWidget<UWrapBox>();
 	Layout->AddChildToVerticalBox(RunViews);
@@ -268,7 +268,7 @@ void UWorldDirectorGenerationDiagnosticsWidget::BuildWidgetTree()
 	CandidatesButton = AddButton(WidgetTree, RunViews, TEXT("Layout candidates"));
 	CandidatesButton->OnClicked.AddDynamic(this, &UWorldDirectorGenerationDiagnosticsWidget::ShowCandidates);
 
-	AddText(WidgetTree, Layout, TEXT("SELECTED STAGE ARTIFACTS"), 11, TextMuted,
+	DiagAddText(WidgetTree, Layout, TEXT("SELECTED STAGE ARTIFACTS"), 11, DiagTextMuted,
 		FMargin(0.0f, 1.0f, 0.0f, 5.0f));
 	UWrapBox* StageViews = WidgetTree->ConstructWidget<UWrapBox>();
 	Layout->AddChildToVerticalBox(StageViews);
@@ -283,9 +283,9 @@ void UWorldDirectorGenerationDiagnosticsWidget::BuildWidgetTree()
 	TelemetryButton = AddButton(WidgetTree, StageViews, TEXT("Telemetry"));
 	TelemetryButton->OnClicked.AddDynamic(this, &UWorldDirectorGenerationDiagnosticsWidget::ShowTelemetry);
 
-	ViewContextText = AddText(WidgetTree, Layout, TEXT("VIEW: OVERVIEW"), 13, AccentBlue,
+	ViewContextText = DiagAddText(WidgetTree, Layout, TEXT("VIEW: OVERVIEW"), 13, DiagAccentBlue,
 		FMargin(0.0f, 5.0f, 0.0f, 4.0f));
-	ArtifactPathText = AddText(WidgetTree, Layout, TEXT(""), 10, TextMuted,
+	ArtifactPathText = DiagAddText(WidgetTree, Layout, TEXT(""), 10, DiagTextMuted,
 		FMargin(0.0f, 0.0f, 0.0f, 6.0f));
 	ArtifactPathText->SetVisibility(ESlateVisibility::Collapsed);
 
@@ -320,9 +320,9 @@ void UWorldDirectorGenerationDiagnosticsWidget::BuildWidgetTree()
 	UButton* CloseButton = AddButton(WidgetTree, Actions, TEXT("Close"));
 	CloseButton->SetToolTipText(FText::FromString(TEXT("Close diagnostics (Escape or F8).")));
 	CloseButton->OnClicked.AddDynamic(this, &UWorldDirectorGenerationDiagnosticsWidget::CloseDiagnostics);
-	AddText(WidgetTree, Layout,
+	DiagAddText(WidgetTree, Layout,
 		TEXT("Keyboard: Ctrl+Left/Right stage  |  Ctrl+C copy report  |  Escape or F8 close"),
-		10, TextMuted, FMargin(0.0f, 1.0f, 0.0f, 0.0f));
+		10, DiagTextMuted, FMargin(0.0f, 1.0f, 0.0f, 0.0f));
 
 	UpdateNavigationState(0);
 	UpdateViewButtonStyles();
