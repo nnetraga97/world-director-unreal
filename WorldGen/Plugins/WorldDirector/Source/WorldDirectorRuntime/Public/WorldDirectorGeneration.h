@@ -65,6 +65,9 @@ struct WORLDDIRECTORRUNTIME_API FWorldDirectorGenerationStageMetric
 	FString Stage;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	FString RequestId;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	FString StartedAtUtc;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)

@@ -2,6 +2,7 @@
 #include "WorldDirectorRuntime.h"
 
 #include "Components/CapsuleComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/InputComponent.h"
 #include "Components/SceneComponent.h"
@@ -13,6 +14,8 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
 #include "Animation/AnimationAsset.h"
+#include "Camera/CameraActor.h"
+#include "Camera/CameraComponent.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Engine/Texture2D.h"
@@ -26,13 +29,16 @@
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
 #include "NavMesh/NavMeshBoundsVolume.h"
+#include "NavMesh/RecastNavMesh.h"
 #include "SmartObjectComponent.h"
 #include "StateTree.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/CommandLine.h"
+#include "Misc/App.h"
 #include "Misc/Parse.h"
+#include "HAL/FileManager.h"
 #include "GenericPlatform/GenericPlatformMisc.h"
 #include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
@@ -60,6 +66,7 @@ void RefreshWorldDirectorPlayerInput(UWorld* World)
 		It->RefreshPlayerInputMode();
 	}
 }
+
 }
 
 AWorldDirectorActivityStationActor::AWorldDirectorActivityStationActor()
@@ -230,10 +237,25 @@ AWorldDirectorTownActor::AWorldDirectorTownActor()
 	TerrainMesh->bUseAsyncCooking = false;
 	TerrainMesh->SetCollisionProfileName(TEXT("BlockAll"));
 	TerrainMesh->SetCanEverAffectNavigation(true);
+	HorizonTerrainMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("GeneratedHorizonTerrain"));
+	HorizonTerrainMesh->SetupAttachment(GetRootComponent());
+	HorizonTerrainMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	HorizonTerrainMesh->SetCanEverAffectNavigation(false);
 	RouteMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("GeneratedRoutes"));
 	RouteMesh->SetupAttachment(GetRootComponent());
 	RouteMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	RouteMesh->SetCanEverAffectNavigation(false);
+	RouteMesh->SetCastShadow(false);
+	PavingMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("GeneratedPaving"));
+	PavingMesh->SetupAttachment(GetRootComponent());
+	PavingMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	PavingMesh->SetCanEverAffectNavigation(false);
+	PavingMesh->SetCastShadow(false);
+	FarmMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("GeneratedFarmParcels"));
+	FarmMesh->SetupAttachment(GetRootComponent());
+	FarmMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	FarmMesh->SetCanEverAffectNavigation(false);
+	FarmMesh->SetCastShadow(false);
 	WaterMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("GeneratedWater"));
 	WaterMesh->SetupAttachment(GetRootComponent());
 	WaterMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -362,7 +384,9 @@ UMaterialInstanceDynamic* MakeSurfaceMaterial(
 	AActor* Owner,
 	const UWorldEnvironmentProfile* Profile,
 	const FSoftObjectPath& BaseColorPath,
-	const FSoftObjectPath& NormalPath)
+	const FSoftObjectPath& NormalPath,
+	const float Roughness = 0.88f,
+	const float NormalPower = 1.0f)
 {
 	UMaterialInterface* Parent = Profile ? Cast<UMaterialInterface>(Profile->OpaqueMasterMaterial.TryLoad()) : nullptr;
 	UTexture2D* BaseColor = Cast<UTexture2D>(BaseColorPath.TryLoad());
@@ -372,33 +396,723 @@ UMaterialInstanceDynamic* MakeSurfaceMaterial(
 		return nullptr;
 	}
 	UMaterialInstanceDynamic* Material = UMaterialInstanceDynamic::Create(Parent, Owner);
+	// These names are the exposed parameters on Fantastic Village's
+	// M_Master_opaque_normal. Binding the normal texture to the older opaque
+	// master silently did nothing, which left every generated surface flat.
 	Material->SetTextureParameterValue(TEXT("Base Color Texture"), BaseColor);
 	Material->SetTextureParameterValue(TEXT("Normal Texture"), Normal);
+	Material->SetVectorParameterValue(TEXT("Base Color Tint"), FLinearColor::White);
+	Material->SetScalarParameterValue(TEXT("SamplingScale"), 1.0f);
+	Material->SetScalarParameterValue(TEXT("Normal Power"), NormalPower);
+	Material->SetScalarParameterValue(TEXT("Custom Roughness"), Roughness);
 	return Material;
 }
 
-void AddRibbonSegment(
+float GetTerrainHeight(
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const int32 X,
+	const int32 Y)
+{
+	const int32 ClampedX = FMath::Clamp(X, 0, Terrain.Resolution - 1);
+	const int32 ClampedY = FMath::Clamp(Y, 0, Terrain.Resolution - 1);
+	return Terrain.HeightsCentimeters[ClampedY * Terrain.Resolution + ClampedX];
+}
+
+float GetRenderedTerrainHeight(
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const FVector2D& Position)
+{
+	if (Terrain.Resolution < 2 ||
+		Terrain.HeightsCentimeters.Num() != Terrain.Resolution * Terrain.Resolution)
+	{
+		return 0.0f;
+	}
+	const float Grid = static_cast<float>(Terrain.Resolution - 1);
+	const float GX = FMath::Clamp(
+		(Position.X + Terrain.ExtentCentimeters) /
+		(2.0f * Terrain.ExtentCentimeters) * Grid, 0.0f, Grid);
+	const float GY = FMath::Clamp(
+		(Position.Y + Terrain.ExtentCentimeters) /
+		(2.0f * Terrain.ExtentCentimeters) * Grid, 0.0f, Grid);
+	const int32 X0 = FMath::FloorToInt(GX);
+	const int32 Y0 = FMath::FloorToInt(GY);
+	const int32 X1 = FMath::Min(X0 + 1, Terrain.Resolution - 1);
+	const int32 Y1 = FMath::Min(Y0 + 1, Terrain.Resolution - 1);
+	const float TX = GX - X0;
+	const float TY = GY - Y0;
+	const float A = GetTerrainHeight(Terrain, X0, Y0);
+	const float B = GetTerrainHeight(Terrain, X1, Y0);
+	const float C = GetTerrainHeight(Terrain, X0, Y1);
+	const float D = GetTerrainHeight(Terrain, X1, Y1);
+	// The authoritative procedural terrain splits each cell along V10-V01.
+	// Match that piecewise plane rather than bilinear sampling so a 2–4 cm
+	// render-only overlay never drops under the actual collision triangle.
+	return TX + TY <= 1.0f
+		? A + TX * (B - A) + TY * (C - A)
+		: D + (1.0f - TY) * (B - D) + (1.0f - TX) * (C - D);
+}
+
+FVector GetTerrainNormal(
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const int32 X,
+	const int32 Y,
+	const float Step)
+{
+	const int32 PreviousX = FMath::Max(0, X - 1);
+	const int32 NextX = FMath::Min(Terrain.Resolution - 1, X + 1);
+	const int32 PreviousY = FMath::Max(0, Y - 1);
+	const int32 NextY = FMath::Min(Terrain.Resolution - 1, Y + 1);
+	const float DeltaX = FMath::Max(Step, (NextX - PreviousX) * Step);
+	const float DeltaY = FMath::Max(Step, (NextY - PreviousY) * Step);
+	const float GradientX = (GetTerrainHeight(Terrain, NextX, Y) -
+		GetTerrainHeight(Terrain, PreviousX, Y)) / DeltaX;
+	const float GradientY = (GetTerrainHeight(Terrain, X, NextY) -
+		GetTerrainHeight(Terrain, X, PreviousY)) / DeltaY;
+	return FVector(-GradientX, -GradientY, 1.0f).GetSafeNormal();
+}
+
+float DistanceToRouteSegment2D(
+	const FVector2D& Point,
+	const FVector2D& A,
+	const FVector2D& B)
+{
+	const FVector2D Delta = B - A;
+	const float Denominator = Delta.SizeSquared();
+	if (Denominator <= KINDA_SMALL_NUMBER)
+	{
+		return FVector2D::Distance(Point, A);
+	}
+	const float T = FMath::Clamp(
+		FVector2D::DotProduct(Point - A, Delta) / Denominator, 0.0f, 1.0f);
+	return FVector2D::Distance(Point, A + Delta * T);
+}
+
+FProcMeshTangent GetTerrainTangent(
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const int32 X,
+	const int32 Y,
+	const float Step)
+{
+	const int32 PreviousX = FMath::Max(0, X - 1);
+	const int32 NextX = FMath::Min(Terrain.Resolution - 1, X + 1);
+	const float DeltaX = FMath::Max(Step, (NextX - PreviousX) * Step);
+	const float GradientX = (GetTerrainHeight(Terrain, NextX, Y) -
+		GetTerrainHeight(Terrain, PreviousX, Y)) / DeltaX;
+	return FProcMeshTangent(FVector(1.0f, 0.0f, GradientX).GetSafeNormal(), false);
+}
+
+FLinearColor GetTerrainBlendColor(
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const int32 Sample)
+{
+	const int32 BlendBase = Sample * 4;
+	if (Terrain.SurfaceBlendWeights.IsValidIndex(BlendBase + 3))
+	{
+		return FLinearColor(
+			Terrain.SurfaceBlendWeights[BlendBase] / 255.0f,
+			Terrain.SurfaceBlendWeights[BlendBase + 1] / 255.0f,
+			Terrain.SurfaceBlendWeights[BlendBase + 2] / 255.0f,
+			Terrain.SurfaceBlendWeights[BlendBase + 3] / 255.0f);
+	}
+	return FLinearColor::White;
+}
+
+FLinearColor SampleTerrainBlendColor(
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const FVector2D& Position)
+{
+	if (Terrain.Resolution < 2 || Terrain.ExtentCentimeters <= 0)
+	{
+		return FLinearColor(0.72f, 0.0f, 0.0f, 0.28f);
+	}
+	const float Grid = static_cast<float>(Terrain.Resolution - 1);
+	const int32 X = FMath::Clamp(FMath::RoundToInt(
+		(Position.X + Terrain.ExtentCentimeters) /
+		(2.0f * Terrain.ExtentCentimeters) * Grid), 0, Terrain.Resolution - 1);
+	const int32 Y = FMath::Clamp(FMath::RoundToInt(
+		(Position.Y + Terrain.ExtentCentimeters) /
+		(2.0f * Terrain.ExtentCentimeters) * Grid), 0, Terrain.Resolution - 1);
+	return GetTerrainBlendColor(Terrain, Y * Terrain.Resolution + X);
+}
+
+void BuildHorizonTerrain(
+	UProceduralMeshComponent* HorizonMesh,
+	const FWorldDirectorTerrainRecipe& Terrain,
+	UMaterialInterface* TerrainMaterial,
+	const int32 TerrainSeed)
+{
+	if (HorizonMesh == nullptr)
+	{
+		return;
+	}
+	HorizonMesh->ClearAllMeshSections();
+	if (TerrainMaterial == nullptr || Terrain.Resolution < 2 || Terrain.ExtentCentimeters <= 0)
+	{
+		return;
+	}
+
+	// The playable recipe remains the authoritative 1.2 km collision surface.
+	// This deliberately coarse continuation only carries the visible landform to
+	// the horizon, where broad seed-dependent undulation reads better than a flat
+	// skirt and costs very little to render.
+	constexpr int32 HorizonResolution = 97;
+	const float CoreExtent = static_cast<float>(Terrain.ExtentCentimeters);
+	const float HorizonExtent = CoreExtent * 2.75f;
+	const float Step = HorizonExtent * 2.0f / (HorizonResolution - 1);
+	const float OuterSpan = HorizonExtent - CoreExtent;
+	const float Phase = static_cast<float>(static_cast<uint32>(TerrainSeed) % 8192U);
+	TArray<FVector> Vertices;
+	TArray<int32> Triangles;
+	TArray<FVector> Normals;
+	TArray<FVector2D> UVs;
+	TArray<FLinearColor> Colors;
+	TArray<FProcMeshTangent> Tangents;
+	TArray<float> Heights;
+	const int32 VertexCount = HorizonResolution * HorizonResolution;
+	Vertices.Reserve(VertexCount);
+	Normals.SetNumUninitialized(VertexCount);
+	UVs.Reserve(VertexCount);
+	Colors.Reserve(VertexCount);
+	Tangents.SetNumUninitialized(VertexCount);
+	Heights.Reserve(VertexCount);
+
+	for (int32 Y = 0; Y < HorizonResolution; ++Y)
+	{
+		for (int32 X = 0; X < HorizonResolution; ++X)
+		{
+			const float WorldX = -HorizonExtent + X * Step;
+			const float WorldY = -HorizonExtent + Y * Step;
+			const FVector2D Position(WorldX, WorldY);
+			const FVector2D EdgePosition(
+				FMath::Clamp(WorldX, -CoreExtent, CoreExtent),
+				FMath::Clamp(WorldY, -CoreExtent, CoreExtent));
+			const float OutsideDistance = FMath::Max(
+				FMath::Max(0.0f, FMath::Abs(WorldX) - CoreExtent),
+				FMath::Max(0.0f, FMath::Abs(WorldY) - CoreExtent));
+			const float LinearFade = FMath::Clamp(OutsideDistance / OuterSpan, 0.0f, 1.0f);
+			const float SmoothFade = LinearFade * LinearFade * (3.0f - 2.0f * LinearFade);
+			const float EdgeHeight = static_cast<float>(
+				FWorldDirectorPhysicalGenerator::SampleHeightCentimeters(Terrain, EdgePosition));
+			const FVector2D InwardDirection = EdgePosition.GetSafeNormal();
+			const FVector2D InnerPosition = EdgePosition - InwardDirection * 3200.0f;
+			const float InnerHeight = static_cast<float>(
+				FWorldDirectorPhysicalGenerator::SampleHeightCentimeters(Terrain, InnerPosition));
+			const float EdgeContinuation = (EdgeHeight - InnerHeight) *
+				FMath::Min(OutsideDistance / 3200.0f, 2.25f) * FMath::Exp(-LinearFade * 5.0f);
+			const float BroadLandform =
+				FMath::Sin((WorldX + Phase * 9.7f) / 39000.0f) * 640.0f +
+				FMath::Sin((WorldY - Phase * 6.3f) / 57000.0f) * 470.0f +
+				FMath::Sin((WorldX + WorldY + Phase * 4.1f) / 91000.0f) * 530.0f;
+			const float SeamUnderlay = OutsideDistance <= KINDA_SMALL_NUMBER ? -65.0f : 0.0f;
+			const float Height = EdgeHeight + EdgeContinuation + BroadLandform * SmoothFade -
+				SmoothFade * 260.0f + SeamUnderlay;
+			Heights.Add(Height);
+			Vertices.Add(FVector(WorldX, WorldY, Height));
+			UVs.Add(FVector2D(WorldX / 500.0f, WorldY / 500.0f));
+
+			const FLinearColor EdgeBlend = SampleTerrainBlendColor(Terrain, EdgePosition);
+			const float HeightRange = FMath::Max(1.0f,
+				static_cast<float>(Terrain.MaximumHeightCentimeters - Terrain.MinimumHeightCentimeters));
+			const float RelativeHeight = FMath::Clamp(
+				(Height - Terrain.MinimumHeightCentimeters) / HeightRange, 0.0f, 1.0f);
+			const float RockWeight = FMath::Lerp(0.16f, 0.48f, RelativeHeight);
+			const FLinearColor DistantBlend(1.0f - RockWeight, 0.0f, 0.0f, RockWeight);
+			Colors.Add(FMath::Lerp(EdgeBlend, DistantBlend, SmoothFade * 0.72f));
+		}
+	}
+
+	for (int32 Y = 0; Y < HorizonResolution; ++Y)
+	{
+		for (int32 X = 0; X < HorizonResolution; ++X)
+		{
+			const int32 PreviousX = FMath::Max(0, X - 1);
+			const int32 NextX = FMath::Min(HorizonResolution - 1, X + 1);
+			const int32 PreviousY = FMath::Max(0, Y - 1);
+			const int32 NextY = FMath::Min(HorizonResolution - 1, Y + 1);
+			const float GradientX = (Heights[Y * HorizonResolution + NextX] -
+				Heights[Y * HorizonResolution + PreviousX]) /
+				FMath::Max(Step, (NextX - PreviousX) * Step);
+			const float GradientY = (Heights[NextY * HorizonResolution + X] -
+				Heights[PreviousY * HorizonResolution + X]) /
+				FMath::Max(Step, (NextY - PreviousY) * Step);
+			const int32 Index = Y * HorizonResolution + X;
+			Normals[Index] = FVector(-GradientX, -GradientY, 1.0f).GetSafeNormal();
+			Tangents[Index] = FProcMeshTangent(
+				FVector(1.0f, 0.0f, GradientX).GetSafeNormal(), false);
+		}
+	}
+
+	const float InnerOverlap = CoreExtent - Step * 0.9f;
+	for (int32 Y = 0; Y < HorizonResolution - 1; ++Y)
+	{
+		for (int32 X = 0; X < HorizonResolution - 1; ++X)
+		{
+			const float CenterX = -HorizonExtent + (X + 0.5f) * Step;
+			const float CenterY = -HorizonExtent + (Y + 0.5f) * Step;
+			if (FMath::Max(FMath::Abs(CenterX), FMath::Abs(CenterY)) < InnerOverlap)
+			{
+				continue;
+			}
+			const int32 V00 = Y * HorizonResolution + X;
+			const int32 V10 = V00 + 1;
+			const int32 V01 = V00 + HorizonResolution;
+			const int32 V11 = V01 + 1;
+			Triangles.Append({V00, V01, V10, V10, V01, V11});
+		}
+	}
+	HorizonMesh->CreateMeshSection_LinearColor(
+		0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
+	HorizonMesh->SetMaterial(0, TerrainMaterial);
+	HorizonMesh->UpdateBounds();
+	HorizonMesh->MarkRenderStateDirty();
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_HORIZON_TERRAIN vertices=%d triangles=%d playableExtentCm=%.0f visualExtentCm=%.0f collision=0 navigation=0"),
+		Vertices.Num(), Triangles.Num() / 3, CoreExtent, HorizonExtent);
+}
+
+void AddRibbonPolyline(
 	TArray<FVector>& Vertices,
 	TArray<int32>& Triangles,
 	TArray<FVector>& Normals,
 	TArray<FVector2D>& UVs,
 	TArray<FLinearColor>& Colors,
 	TArray<FProcMeshTangent>& Tangents,
-	const FVector& Start,
-	const FVector& End,
+	const TArray<FVector>& SourcePoints,
 	const float HalfWidth,
-	const float UStart,
-	const float UEnd)
+	const float TextureRepeatCentimeters,
+	const float VerticalOffset)
 {
-	const FVector Direction = (End - Start).GetSafeNormal2D();
-	const FVector Side(-Direction.Y, Direction.X, 0.0f);
+	TArray<FVector> Points;
+	for (const FVector& Point : SourcePoints)
+	{
+		if (Points.IsEmpty() || !Point.Equals(Points.Last(), 1.0f))
+		{
+			Points.Add(Point + FVector(0.0f, 0.0f, VerticalOffset));
+		}
+	}
+	if (Points.Num() < 2 || HalfWidth <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
 	const int32 Base = Vertices.Num();
-	Vertices.Append({Start - Side * HalfWidth, Start + Side * HalfWidth, End - Side * HalfWidth, End + Side * HalfWidth});
-	Triangles.Append({Base, Base + 2, Base + 1, Base + 1, Base + 2, Base + 3});
-	Normals.Append({FVector::UpVector, FVector::UpVector, FVector::UpVector, FVector::UpVector});
-	UVs.Append({FVector2D(UStart, 0.0f), FVector2D(UStart, 1.0f), FVector2D(UEnd, 0.0f), FVector2D(UEnd, 1.0f)});
-	Colors.Append({FLinearColor::White, FLinearColor::White, FLinearColor::White, FLinearColor::White});
-	Tangents.Append({FProcMeshTangent(Direction, false), FProcMeshTangent(Direction, false), FProcMeshTangent(Direction, false), FProcMeshTangent(Direction, false)});
+	float DistanceAlong = 0.0f;
+	for (int32 Index = 0; Index < Points.Num(); ++Index)
+	{
+		if (Index > 0)
+		{
+			DistanceAlong += FVector::Distance(Points[Index - 1], Points[Index]);
+		}
+		const FVector Incoming = Index > 0
+			? (Points[Index] - Points[Index - 1]).GetSafeNormal() : FVector::ZeroVector;
+		const FVector Outgoing = Index + 1 < Points.Num()
+			? (Points[Index + 1] - Points[Index]).GetSafeNormal() : FVector::ZeroVector;
+		FVector PathTangent = (Incoming + Outgoing).GetSafeNormal();
+		if (PathTangent.IsNearlyZero())
+		{
+			PathTangent = Index + 1 < Points.Num() ? Outgoing : Incoming;
+		}
+		const FVector Incoming2D = Index > 0
+			? (Points[Index] - Points[Index - 1]).GetSafeNormal2D() : FVector::ZeroVector;
+		const FVector Outgoing2D = Index + 1 < Points.Num()
+			? (Points[Index + 1] - Points[Index]).GetSafeNormal2D() : FVector::ZeroVector;
+		const FVector SideIn(-Incoming2D.Y, Incoming2D.X, 0.0f);
+		const FVector SideOut(-Outgoing2D.Y, Outgoing2D.X, 0.0f);
+		FVector Miter = (SideIn + SideOut).GetSafeNormal2D();
+		if (Miter.IsNearlyZero())
+		{
+			Miter = !SideOut.IsNearlyZero() ? SideOut : SideIn;
+		}
+		const FVector ReferenceSide = !SideOut.IsNearlyZero() ? SideOut : SideIn;
+		const float MiterDenominator = FMath::Max(0.55f, FMath::Abs(FVector::DotProduct(Miter, ReferenceSide)));
+		const FVector Offset = Miter * FMath::Min(HalfWidth / MiterDenominator, HalfWidth * 1.8f);
+		const FVector SurfaceNormal = FVector::CrossProduct(PathTangent, Miter).GetSafeNormal();
+		const FVector SafeNormal = SurfaceNormal.Z >= 0.0f ? SurfaceNormal : -SurfaceNormal;
+		const float U = DistanceAlong / FMath::Max(1.0f, TextureRepeatCentimeters);
+
+		Vertices.Add(Points[Index] - Offset);
+		Vertices.Add(Points[Index] + Offset);
+		Normals.Append({SafeNormal, SafeNormal});
+		UVs.Append({FVector2D(U, 0.0f), FVector2D(U, 1.0f)});
+		Colors.Append({FLinearColor::White, FLinearColor::White});
+		Tangents.Append({FProcMeshTangent(PathTangent, false), FProcMeshTangent(PathTangent, false)});
+		if (Index > 0)
+		{
+			const int32 PreviousPair = Base + (Index - 1) * 2;
+			const int32 CurrentPair = Base + Index * 2;
+			Triangles.Append({PreviousPair, PreviousPair + 1, CurrentPair,
+				CurrentPair, PreviousPair + 1, CurrentPair + 1});
+		}
+	}
+}
+
+void AddFeatheredRoutePolyline(
+	TArray<FVector>& Vertices,
+	TArray<int32>& Triangles,
+	TArray<FVector>& Normals,
+	TArray<FVector2D>& UVs,
+	TArray<FLinearColor>& Colors,
+	TArray<FProcMeshTangent>& Tangents,
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const TArray<FVector>& SourcePoints,
+	const float HalfWidth,
+	const float VerticalOffset)
+{
+	TArray<FVector> UniquePoints;
+	for (const FVector& Point : SourcePoints)
+	{
+		if (UniquePoints.IsEmpty() || !Point.Equals(UniquePoints.Last(), 1.0f))
+		{
+			UniquePoints.Add(Point);
+		}
+	}
+	if (UniquePoints.Num() < 2 || HalfWidth <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+	// Physical control points describe the corridor, not render tessellation.
+	// Subdivide long chords so every road quad follows the same piecewise terrain
+	// triangles used by collision; otherwise low offsets visibly clip into hills.
+	constexpr float MaximumRenderSegmentLength = 180.0f;
+	TArray<FVector> Points;
+	Points.Add(UniquePoints[0] + FVector(0.0f, 0.0f, VerticalOffset));
+	for (int32 Index = 1; Index < UniquePoints.Num(); ++Index)
+	{
+		const int32 Steps = FMath::Max(1, FMath::CeilToInt(
+			FVector2D::Distance(FVector2D(UniquePoints[Index - 1]),
+				FVector2D(UniquePoints[Index])) / MaximumRenderSegmentLength));
+		for (int32 StepIndex = 1; StepIndex <= Steps; ++StepIndex)
+		{
+			Points.Add(FMath::Lerp(
+				UniquePoints[Index - 1], UniquePoints[Index],
+				static_cast<float>(StepIndex) / Steps) + FVector(0.0f, 0.0f, VerticalOffset));
+		}
+	}
+
+	// Seven rows preserve the authored road width while giving its shoulders a
+	// narrow grass-to-gravel transition. This remains render-only: collision and
+	// navigation continue to come from the authoritative terrain mesh.
+	static const float CrossSection[] = {-1.32f, -1.0f, -0.72f, 0.0f, 0.72f, 1.0f, 1.32f};
+	static const FLinearColor CrossSectionColor[] = {
+		FLinearColor(1.0f, 0.0f, 0.0f, 0.0f),
+		FLinearColor(0.42f, 0.58f, 0.0f, 0.0f),
+		FLinearColor(0.06f, 0.94f, 0.0f, 0.0f),
+		FLinearColor(0.0f, 1.0f, 0.0f, 0.0f),
+		FLinearColor(0.06f, 0.94f, 0.0f, 0.0f),
+		FLinearColor(0.42f, 0.58f, 0.0f, 0.0f),
+		FLinearColor(1.0f, 0.0f, 0.0f, 0.0f)};
+	constexpr int32 RowCount = UE_ARRAY_COUNT(CrossSection);
+	const int32 Base = Vertices.Num();
+	for (int32 Index = 0; Index < Points.Num(); ++Index)
+	{
+		const FVector Incoming = Index > 0
+			? (Points[Index] - Points[Index - 1]).GetSafeNormal2D() : FVector::ZeroVector;
+		const FVector Outgoing = Index + 1 < Points.Num()
+			? (Points[Index + 1] - Points[Index]).GetSafeNormal2D() : FVector::ZeroVector;
+		FVector PathTangent = (Incoming + Outgoing).GetSafeNormal2D();
+		if (PathTangent.IsNearlyZero())
+		{
+			PathTangent = !Outgoing.IsNearlyZero() ? Outgoing : Incoming;
+		}
+		const FVector SideIn(-Incoming.Y, Incoming.X, 0.0f);
+		const FVector SideOut(-Outgoing.Y, Outgoing.X, 0.0f);
+		FVector Miter = (SideIn + SideOut).GetSafeNormal2D();
+		if (Miter.IsNearlyZero())
+		{
+			Miter = !SideOut.IsNearlyZero() ? SideOut : SideIn;
+		}
+		const FVector ReferenceSide = !SideOut.IsNearlyZero() ? SideOut : SideIn;
+		const float MiterDenominator = FMath::Max(
+			0.68f, FMath::Abs(FVector::DotProduct(Miter, ReferenceSide)));
+		const float BoundaryVariation = 1.0f + 0.055f * FMath::Sin(
+			Points[Index].X * 0.0047f + Points[Index].Y * 0.0031f + Index * 1.73f);
+		for (int32 Row = 0; Row < RowCount; ++Row)
+		{
+			const float MiterDistance = FMath::Clamp(
+				CrossSection[Row] * HalfWidth * BoundaryVariation / MiterDenominator,
+				-HalfWidth * 1.45f, HalfWidth * 1.45f);
+			FVector Vertex = Points[Index] + Miter * MiterDistance;
+			const bool bOuterShoulder = FMath::Abs(CrossSection[Row]) > 1.01f;
+			Vertex.Z = GetRenderedTerrainHeight(
+				Terrain, FVector2D(Vertex)) + VerticalOffset + (bOuterShoulder ? 0.5f : 1.5f);
+			Vertices.Add(Vertex);
+			Normals.Add(FVector::UpVector);
+			UVs.Add(FVector2D(Vertex.X / 500.0f, Vertex.Y / 500.0f));
+			Colors.Add(CrossSectionColor[Row]);
+			Tangents.Add(FProcMeshTangent(PathTangent, false));
+		}
+		if (Index > 0)
+		{
+			const int32 Previous = Base + (Index - 1) * RowCount;
+			const int32 Current = Base + Index * RowCount;
+			for (int32 Row = 0; Row < RowCount - 1; ++Row)
+			{
+				Triangles.Append({Previous + Row, Previous + Row + 1, Current + Row,
+					Current + Row, Previous + Row + 1, Current + Row + 1});
+			}
+		}
+	}
+}
+
+void AddRouteJunction(
+	TArray<FVector>& Vertices,
+	TArray<int32>& Triangles,
+	TArray<FVector>& Normals,
+	TArray<FVector2D>& UVs,
+	TArray<FLinearColor>& Colors,
+	TArray<FProcMeshTangent>& Tangents,
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const FVector2D& Center,
+	const float Radius)
+{
+	constexpr int32 SegmentCount = 16;
+	const int32 Base = Vertices.Num();
+	const float CenterHeight = GetRenderedTerrainHeight(Terrain, Center) + 3.0f;
+	Vertices.Add(FVector(Center, CenterHeight));
+	Normals.Add(FVector::UpVector);
+	UVs.Add(Center / 500.0f);
+	Colors.Add(FLinearColor(0.0f, 1.0f, 0.0f, 0.0f));
+	Tangents.Add(FProcMeshTangent(FVector::ForwardVector, false));
+	for (int32 Ring = 0; Ring < 2; ++Ring)
+	{
+		const float RingRadius = Radius * (Ring == 0 ? 1.0f : 1.22f);
+		const FLinearColor RingColor = Ring == 0
+			? FLinearColor(0.0f, 1.0f, 0.0f, 0.0f)
+			: FLinearColor(0.34f, 0.66f, 0.0f, 0.0f);
+		for (int32 Segment = 0; Segment < SegmentCount; ++Segment)
+		{
+			const float Angle = 2.0f * PI * Segment / SegmentCount;
+			const FVector2D Position = Center + FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * RingRadius;
+			const float Height = GetRenderedTerrainHeight(
+				Terrain, Position) + (Ring == 0 ? 3.0f : 2.0f);
+			Vertices.Add(FVector(Position, Height));
+			Normals.Add(FVector::UpVector);
+			UVs.Add(Position / 500.0f);
+			Colors.Add(RingColor);
+			Tangents.Add(FProcMeshTangent(FVector::ForwardVector, false));
+		}
+	}
+	const int32 InnerStart = Base + 1;
+	const int32 OuterStart = InnerStart + SegmentCount;
+	for (int32 Segment = 0; Segment < SegmentCount; ++Segment)
+	{
+		const int32 InnerCurrent = InnerStart + Segment;
+		const int32 InnerNext = InnerStart + (Segment + 1) % SegmentCount;
+		const int32 OuterCurrent = OuterStart + Segment;
+		const int32 OuterNext = OuterStart + (Segment + 1) % SegmentCount;
+		Triangles.Append({Base, InnerNext, InnerCurrent});
+		Triangles.Append({InnerCurrent, InnerNext, OuterCurrent,
+			InnerNext, OuterNext, OuterCurrent});
+	}
+}
+
+void AddTerrainConformingTriangle(
+	TArray<FVector>& Vertices,
+	TArray<int32>& Triangles,
+	TArray<FVector>& Normals,
+	TArray<FVector2D>& UVs,
+	TArray<FLinearColor>& Colors,
+	TArray<FProcMeshTangent>& Tangents,
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const FVector2D& P0,
+	const FVector2D& P1,
+	const FVector2D& P2,
+	const FVector2D& UV0,
+	const FVector2D& UV1,
+	const FVector2D& UV2,
+	const FLinearColor& C0,
+	const FLinearColor& C1,
+	const FLinearColor& C2,
+	const float Offset0,
+	const float Offset1,
+	const float Offset2,
+	const FVector& Tangent)
+{
+	constexpr float MaximumEdgeLength = 180.0f;
+	const float LongestEdge = FMath::Max3(
+		FVector2D::Distance(P0, P1),
+		FVector2D::Distance(P1, P2),
+		FVector2D::Distance(P2, P0));
+	const int32 Steps = FMath::Clamp(
+		FMath::CeilToInt(LongestEdge / MaximumEdgeLength), 1, 32);
+	TArray<TArray<int32>> GridIndices;
+	GridIndices.SetNum(Steps + 1);
+	for (int32 Row = 0; Row <= Steps; ++Row)
+	{
+		GridIndices[Row].SetNum(Steps - Row + 1);
+		for (int32 Column = 0; Column <= Steps - Row; ++Column)
+		{
+			const float Weight1 = static_cast<float>(Row) / Steps;
+			const float Weight2 = static_cast<float>(Column) / Steps;
+			const float Weight0 = 1.0f - Weight1 - Weight2;
+			const FVector2D Position = P0 * Weight0 + P1 * Weight1 + P2 * Weight2;
+			const float VerticalOffset =
+				Offset0 * Weight0 + Offset1 * Weight1 + Offset2 * Weight2;
+			GridIndices[Row][Column] = Vertices.Num();
+			Vertices.Add(FVector(
+				Position, GetRenderedTerrainHeight(Terrain, Position) + VerticalOffset));
+			Normals.Add(FVector::UpVector);
+			UVs.Add(UV0 * Weight0 + UV1 * Weight1 + UV2 * Weight2);
+			Colors.Add(C0 * Weight0 + C1 * Weight1 + C2 * Weight2);
+			Tangents.Add(FProcMeshTangent(Tangent, false));
+		}
+	}
+	for (int32 Row = 0; Row < Steps; ++Row)
+	{
+		for (int32 Column = 0; Column < Steps - Row; ++Column)
+		{
+			const int32 A = GridIndices[Row][Column];
+			const int32 B = GridIndices[Row + 1][Column];
+			const int32 C = GridIndices[Row][Column + 1];
+			Triangles.Append({A, B, C});
+			if (Column < Steps - Row - 1)
+			{
+				const int32 D = GridIndices[Row + 1][Column + 1];
+				Triangles.Append({B, D, C});
+			}
+		}
+	}
+}
+
+void AddCourtyard(
+	TArray<FVector>& Vertices,
+	TArray<int32>& Triangles,
+	TArray<FVector>& Normals,
+	TArray<FVector2D>& UVs,
+	TArray<FLinearColor>& Colors,
+	TArray<FProcMeshTangent>& Tangents,
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const FResolvedLocationPlan& Location,
+	const bool bLandmark)
+{
+	const FVector2D BuildingCenter(Location.Transform.GetLocation());
+	FVector2D Outward = (FVector2D(Location.EntranceTransform.GetLocation()) - BuildingCenter).GetSafeNormal();
+	if (Outward.IsNearlyZero())
+	{
+		const FVector Forward = Location.Transform.GetRotation().RotateVector(FVector(0.0f, -1.0f, 0.0f));
+		Outward = FVector2D(Forward).GetSafeNormal();
+	}
+	// Across and Outward form a right-handed basis so the fan winding faces up.
+	const FVector2D Across(Outward.Y, -Outward.X);
+	const float HalfAcross = bLandmark
+		? FMath::Max(1500.0f, Location.FootprintSize.X * 0.5f + 560.0f)
+		: Location.FootprintSize.X * 0.5f + 320.0f;
+	const float HalfAlong = bLandmark
+		? FMath::Max(1750.0f, Location.FootprintSize.Y * 0.5f + 920.0f)
+		: Location.FootprintSize.Y * 0.5f + 420.0f;
+	const FVector2D Center = BuildingCenter + Outward * (bLandmark ? 460.0f : 130.0f);
+	const float Chamfer = FMath::Min(420.0f, FMath::Min(HalfAcross, HalfAlong) * 0.24f);
+	const FVector2D OuterPerimeter[] = {
+		FVector2D(-HalfAcross + Chamfer, -HalfAlong),
+		FVector2D(HalfAcross - Chamfer, -HalfAlong),
+		FVector2D(HalfAcross, -HalfAlong + Chamfer),
+		FVector2D(HalfAcross, HalfAlong - Chamfer),
+		FVector2D(HalfAcross - Chamfer, HalfAlong),
+		FVector2D(-HalfAcross + Chamfer, HalfAlong),
+		FVector2D(-HalfAcross, HalfAlong - Chamfer),
+		FVector2D(-HalfAcross, -HalfAlong + Chamfer)};
+	constexpr int32 PerimeterCount = UE_ARRAY_COUNT(OuterPerimeter);
+	const float EdgeFeather = bLandmark ? 220.0f : 150.0f;
+	const FVector2D InnerScale(
+		FMath::Max(0.1f, (HalfAcross - EdgeFeather) / HalfAcross),
+		FMath::Max(0.1f, (HalfAlong - EdgeFeather) / HalfAlong));
+	TArray<FVector2D> InnerPositions;
+	TArray<FVector2D> OuterPositions;
+	InnerPositions.Reserve(PerimeterCount);
+	OuterPositions.Reserve(PerimeterCount);
+	for (const FVector2D& OuterLocal : OuterPerimeter)
+	{
+		const FVector2D Local(OuterLocal.X * InnerScale.X, OuterLocal.Y * InnerScale.Y);
+		InnerPositions.Add(Center + Across * Local.X + Outward * Local.Y);
+	}
+	for (const FVector2D& Local : OuterPerimeter)
+	{
+		OuterPositions.Add(Center + Across * Local.X + Outward * Local.Y);
+	}
+	const FVector SurfaceTangent(Across, 0.0f);
+	// Inner paving sits just above the route overlay so roads visually terminate
+	// at the court. Every triangle is independently terrain-conforming; this
+	// avoids the long fan chords that clipped into graded plot shoulders.
+	for (int32 Index = 0; Index < PerimeterCount; ++Index)
+	{
+		const int32 Next = (Index + 1) % PerimeterCount;
+		AddTerrainConformingTriangle(
+			Vertices, Triangles, Normals, UVs, Colors, Tangents, Terrain,
+			Center, InnerPositions[Next], InnerPositions[Index],
+			Center / 500.0f, InnerPositions[Next] / 500.0f, InnerPositions[Index] / 500.0f,
+			FLinearColor::White, FLinearColor::White, FLinearColor::White,
+			5.0f, 5.0f, 5.0f, SurfaceTangent);
+		AddTerrainConformingTriangle(
+			Vertices, Triangles, Normals, UVs, Colors, Tangents, Terrain,
+			InnerPositions[Index], InnerPositions[Next], OuterPositions[Index],
+			InnerPositions[Index] / 500.0f, InnerPositions[Next] / 500.0f,
+			OuterPositions[Index] / 500.0f,
+			FLinearColor::White, FLinearColor::White, FLinearColor::Black,
+			5.0f, 5.0f, 4.0f, SurfaceTangent);
+		AddTerrainConformingTriangle(
+			Vertices, Triangles, Normals, UVs, Colors, Tangents, Terrain,
+			InnerPositions[Next], OuterPositions[Next], OuterPositions[Index],
+			InnerPositions[Next] / 500.0f, OuterPositions[Next] / 500.0f,
+			OuterPositions[Index] / 500.0f,
+			FLinearColor::White, FLinearColor::Black, FLinearColor::Black,
+			5.0f, 4.0f, 4.0f, SurfaceTangent);
+	}
+}
+
+void AddFarmParcelSurface(
+	TArray<FVector>& Vertices,
+	TArray<int32>& Triangles,
+	TArray<FVector>& Normals,
+	TArray<FVector2D>& UVs,
+	TArray<FLinearColor>& Colors,
+	TArray<FProcMeshTangent>& Tangents,
+	const FWorldDirectorTerrainRecipe& Terrain,
+	const FWorldDirectorFarmParcel& Parcel)
+{
+	if (Parcel.BoundaryPoints.Num() < 3)
+	{
+		return;
+	}
+	const float YawRadians = FMath::DegreesToRadians(Parcel.YawDegrees);
+	const float CosYaw = FMath::Cos(YawRadians);
+	const float SinYaw = FMath::Sin(YawRadians);
+	const auto ParcelUV = [&](const FVector2D& Position)
+	{
+		const FVector2D Delta = Position - Parcel.Center;
+		return FVector2D(
+			Delta.X * CosYaw + Delta.Y * SinYaw,
+			-Delta.X * SinYaw + Delta.Y * CosYaw) / 500.0f;
+	};
+	TArray<FVector2D> InnerBoundary;
+	InnerBoundary.Reserve(Parcel.BoundaryPoints.Num());
+	for (const FVector2D& BoundaryPoint : Parcel.BoundaryPoints)
+	{
+		InnerBoundary.Add(FMath::Lerp(Parcel.Center, BoundaryPoint, 0.88f));
+	}
+	const FLinearColor FarmColor(0.0f, 0.0f, 1.0f, 0.0f);
+	const FLinearColor GrassColor(1.0f, 0.0f, 0.0f, 0.0f);
+	const FVector SurfaceTangent(FMath::Cos(YawRadians), FMath::Sin(YawRadians), 0.0f);
+	for (int32 Index = 0; Index < Parcel.BoundaryPoints.Num(); ++Index)
+	{
+		const int32 Next = (Index + 1) % Parcel.BoundaryPoints.Num();
+		AddTerrainConformingTriangle(
+			Vertices, Triangles, Normals, UVs, Colors, Tangents, Terrain,
+			Parcel.Center, InnerBoundary[Next], InnerBoundary[Index],
+			ParcelUV(Parcel.Center), ParcelUV(InnerBoundary[Next]), ParcelUV(InnerBoundary[Index]),
+			FarmColor, FarmColor, FarmColor, 3.5f, 3.5f, 3.5f, SurfaceTangent);
+		AddTerrainConformingTriangle(
+			Vertices, Triangles, Normals, UVs, Colors, Tangents, Terrain,
+			InnerBoundary[Index], InnerBoundary[Next], Parcel.BoundaryPoints[Index],
+			ParcelUV(InnerBoundary[Index]), ParcelUV(InnerBoundary[Next]),
+			ParcelUV(Parcel.BoundaryPoints[Index]),
+			FarmColor, FarmColor, GrassColor, 3.5f, 3.5f, 2.0f, SurfaceTangent);
+		AddTerrainConformingTriangle(
+			Vertices, Triangles, Normals, UVs, Colors, Tangents, Terrain,
+			InnerBoundary[Next], Parcel.BoundaryPoints[Next], Parcel.BoundaryPoints[Index],
+			ParcelUV(InnerBoundary[Next]), ParcelUV(Parcel.BoundaryPoints[Next]),
+			ParcelUV(Parcel.BoundaryPoints[Index]),
+			FarmColor, GrassColor, GrassColor, 3.5f, 2.0f, 2.0f, SurfaceTangent);
+	}
 }
 }
 
@@ -422,70 +1136,162 @@ bool AWorldDirectorTownActor::BuildTerrainAndSurfaces(
 		OutReport.AddError(TEXT("generator.profile_invalid"), TEXT("environmentProfile"), ProfileError);
 		return false;
 	}
-	const float Step = 2.0f * Plan.Terrain.ExtentCentimeters / (Resolution - 1);
-	for (int32 SurfaceIndex = 0; SurfaceIndex < 5; ++SurfaceIndex)
+	TerrainMesh->ClearAllMeshSections();
+	if (HorizonTerrainMesh != nullptr)
 	{
+		HorizonTerrainMesh->ClearAllMeshSections();
+	}
+	const float Step = 2.0f * Plan.Terrain.ExtentCentimeters / (Resolution - 1);
+	TArray<FVector> SampleNormals;
+	TArray<FProcMeshTangent> SampleTangents;
+	SampleNormals.SetNumUninitialized(Plan.Terrain.HeightsCentimeters.Num());
+	SampleTangents.SetNumUninitialized(Plan.Terrain.HeightsCentimeters.Num());
+	for (int32 Y = 0; Y < Resolution; ++Y)
+	{
+		for (int32 X = 0; X < Resolution; ++X)
+		{
+			const int32 Sample = Y * Resolution + X;
+			SampleNormals[Sample] = GetTerrainNormal(Plan.Terrain, X, Y, Step);
+			SampleTangents[Sample] = GetTerrainTangent(Plan.Terrain, X, Y, Step);
+		}
+	}
+	const int32 SampleCount = Plan.Terrain.HeightsCentimeters.Num();
+	const bool bHasCompleteBlendMask = Plan.Version >= 3 &&
+		Plan.Terrain.SurfaceBlendWeights.Num() == SampleCount * 4;
+	UMaterialInterface* TerrainBlend = bHasCompleteBlendMask
+		? Cast<UMaterialInterface>(Profile->TerrainBlendMaterial.TryLoad()) : nullptr;
+	if (bHasCompleteBlendMask && TerrainBlend == nullptr)
+	{
+		OutReport.AddError(TEXT("generator.terrain_blend_material_missing"),
+			TEXT("environmentProfile.terrainBlendMaterial"),
+			TEXT("The V3 four-layer terrain material could not be loaded."));
+		return false;
+	}
+
+	if (TerrainBlend != nullptr)
+	{
+		// V3 is a single shared-vertex terrain section. Vertex color RGBA carries
+		// grass, gravel, farm, and rock weights into the project-owned blend
+		// material, eliminating grid-shaped material boundaries while also keeping
+		// the lakebed and navigation collision continuous beneath water.
 		TArray<FVector> Vertices;
 		TArray<int32> Triangles;
-		TArray<FVector> Normals;
 		TArray<FVector2D> UVs;
 		TArray<FLinearColor> Colors;
-		TArray<FProcMeshTangent> Tangents;
+		Vertices.Reserve(SampleCount);
+		Triangles.Reserve((Resolution - 1) * (Resolution - 1) * 6);
+		UVs.Reserve(SampleCount);
+		Colors.Reserve(SampleCount);
+		for (int32 Y = 0; Y < Resolution; ++Y)
+		{
+			for (int32 X = 0; X < Resolution; ++X)
+			{
+				const int32 Sample = Y * Resolution + X;
+				const float WorldX = -Plan.Terrain.ExtentCentimeters + X * Step;
+				const float WorldY = -Plan.Terrain.ExtentCentimeters + Y * Step;
+				Vertices.Add(FVector(WorldX, WorldY, Plan.Terrain.HeightsCentimeters[Sample]));
+				UVs.Add(FVector2D(WorldX / 500.0f, WorldY / 500.0f));
+				Colors.Add(GetTerrainBlendColor(Plan.Terrain, Sample));
+			}
+		}
 		for (int32 Y = 0; Y < Resolution - 1; ++Y)
 		{
 			for (int32 X = 0; X < Resolution - 1; ++X)
 			{
-				const int32 Sample = Y * Resolution + X;
-				const uint8 Surface = Plan.Terrain.SurfaceTypes[Sample];
-				// Water is a visual/semantic mask, not permission to remove the world floor.
-				// Emit submerged cells into the rock section so collision and nav always have
-				// a continuous lakebed/seabed beneath the non-colliding water surface.
-				const uint8 CollisionSurface = Surface == static_cast<uint8>(EWorldDirectorSurfaceType::Water)
-					? static_cast<uint8>(EWorldDirectorSurfaceType::Rock) : Surface;
-				if (CollisionSurface != static_cast<uint8>(SurfaceIndex))
-				{
-					continue;
-				}
-				const float X0 = -Plan.Terrain.ExtentCentimeters + X * Step;
-				const float Y0 = -Plan.Terrain.ExtentCentimeters + Y * Step;
-				const int32 Base = Vertices.Num();
-				const FVector V00(X0, Y0, Plan.Terrain.HeightsCentimeters[Sample]);
-				const FVector V10(X0 + Step, Y0, Plan.Terrain.HeightsCentimeters[Sample + 1]);
-				const FVector V01(X0, Y0 + Step, Plan.Terrain.HeightsCentimeters[Sample + Resolution]);
-				const FVector V11(X0 + Step, Y0 + Step, Plan.Terrain.HeightsCentimeters[Sample + Resolution + 1]);
-				Vertices.Append({V00, V10, V01, V11});
-				Triangles.Append({Base, Base + 2, Base + 1, Base + 1, Base + 2, Base + 3});
-				const FVector NormalA = FVector::CrossProduct(V01 - V00, V10 - V00).GetSafeNormal();
-				const FVector NormalB = FVector::CrossProduct(V11 - V10, V01 - V10).GetSafeNormal();
-				Normals.Append({NormalA, NormalA, NormalB, NormalB});
-				const float U = X0 / 500.0f;
-				const float V = Y0 / 500.0f;
-				UVs.Append({FVector2D(U, V), FVector2D(U + Step / 500.0f, V), FVector2D(U, V + Step / 500.0f), FVector2D(U + Step / 500.0f, V + Step / 500.0f)});
-				Colors.Append({FLinearColor::White, FLinearColor::White, FLinearColor::White, FLinearColor::White});
-				Tangents.Append({FProcMeshTangent(1, 0, 0), FProcMeshTangent(1, 0, 0), FProcMeshTangent(1, 0, 0), FProcMeshTangent(1, 0, 0)});
+				const int32 V00 = Y * Resolution + X;
+				const int32 V10 = V00 + 1;
+				const int32 V01 = V00 + Resolution;
+				const int32 V11 = V01 + 1;
+				// UProceduralMeshComponent's collision cook flips triangle normals.
+				// Keep this collision-compatible winding so Recast receives an
+				// upward-facing walkable surface; the explicit vertex normals still
+				// provide upward-facing render lighting.
+				Triangles.Append({V00, V01, V10, V10, V01, V11});
 			}
 		}
-		if (!Vertices.IsEmpty())
-		{
-			TerrainMesh->CreateMeshSection_LinearColor(SurfaceIndex, Vertices, Triangles, Normals, UVs, Colors, Tangents, true);
-		}
+		TerrainMesh->CreateMeshSection_LinearColor(
+			0, Vertices, Triangles, SampleNormals, UVs, Colors, SampleTangents, true);
+		TerrainMesh->SetMaterial(0, TerrainBlend);
+		BuildHorizonTerrain(HorizonTerrainMesh, Plan.Terrain, TerrainBlend,
+			Plan.StageSeeds.FindRef(TEXT("terrain")));
 	}
-	UMaterialInstanceDynamic* Grass = MakeSurfaceMaterial(this, Profile, Profile->Surfaces[0].BaseColorTexture, Profile->Surfaces[0].NormalTexture);
-	UMaterialInstanceDynamic* Gravel = MakeSurfaceMaterial(this, Profile, Profile->Surfaces[1].BaseColorTexture, Profile->Surfaces[1].NormalTexture);
-	UMaterialInstanceDynamic* Paving = MakeSurfaceMaterial(this, Profile, Profile->Surfaces[2].BaseColorTexture, Profile->Surfaces[2].NormalTexture);
-	UMaterialInstanceDynamic* Farm = MakeSurfaceMaterial(this, Profile, Profile->Surfaces[3].BaseColorTexture, Profile->Surfaces[3].NormalTexture);
-	UMaterialInterface* Rock = Cast<UMaterialInterface>(Profile->RockMaterial.TryLoad());
-	for (int32 Index = 0; Index < 5; ++Index)
+	else
 	{
-		UMaterialInterface* Material = Index == 0 ? Grass : Index == 1 ? Gravel : Index == 2 ? Paving : Index == 3 ? Farm : Rock;
-		if (Material == nullptr)
+		// V2 compatibility path: retain categorical material sections for saved
+		// recipes that predate the four-channel blend mask.
+		for (int32 SurfaceIndex = 0; SurfaceIndex < 5; ++SurfaceIndex)
 		{
-			OutReport.AddError(TEXT("generator.surface_material_missing"), FString::Printf(TEXT("terrain.materials[%d]"), Index),
-				TEXT("StylizedVillage surface material or texture could not load."));
+			TArray<FVector> Vertices;
+			TArray<int32> Triangles;
+			TArray<FVector> Normals;
+			TArray<FVector2D> UVs;
+			TArray<FLinearColor> Colors;
+			TArray<FProcMeshTangent> Tangents;
+			for (int32 Y = 0; Y < Resolution - 1; ++Y)
+			{
+				for (int32 X = 0; X < Resolution - 1; ++X)
+				{
+					const int32 Sample = Y * Resolution + X;
+					const uint8 Surface = Plan.Terrain.SurfaceTypes[Sample];
+					const uint8 CollisionSurface = Surface == static_cast<uint8>(EWorldDirectorSurfaceType::Water)
+						? static_cast<uint8>(EWorldDirectorSurfaceType::Rock) : Surface;
+					if (CollisionSurface != static_cast<uint8>(SurfaceIndex))
+					{
+						continue;
+					}
+					const float X0 = -Plan.Terrain.ExtentCentimeters + X * Step;
+					const float Y0 = -Plan.Terrain.ExtentCentimeters + Y * Step;
+					const int32 Base = Vertices.Num();
+					const FVector V00(X0, Y0, Plan.Terrain.HeightsCentimeters[Sample]);
+					const FVector V10(X0 + Step, Y0, Plan.Terrain.HeightsCentimeters[Sample + 1]);
+					const FVector V01(X0, Y0 + Step, Plan.Terrain.HeightsCentimeters[Sample + Resolution]);
+					const FVector V11(X0 + Step, Y0 + Step, Plan.Terrain.HeightsCentimeters[Sample + Resolution + 1]);
+					Vertices.Append({V00, V10, V01, V11});
+					// See the V3 section above: ProceduralMesh collision cooking flips
+					// this winding before exporting the triangles to navigation.
+					Triangles.Append({Base, Base + 2, Base + 1, Base + 1, Base + 2, Base + 3});
+					Normals.Append({SampleNormals[Sample], SampleNormals[Sample + 1],
+						SampleNormals[Sample + Resolution], SampleNormals[Sample + Resolution + 1]});
+					const float U = X0 / 500.0f;
+					const float V = Y0 / 500.0f;
+					UVs.Append({FVector2D(U, V), FVector2D(U + Step / 500.0f, V),
+						FVector2D(U, V + Step / 500.0f), FVector2D(U + Step / 500.0f, V + Step / 500.0f)});
+					Colors.Append({GetTerrainBlendColor(Plan.Terrain, Sample),
+						GetTerrainBlendColor(Plan.Terrain, Sample + 1),
+						GetTerrainBlendColor(Plan.Terrain, Sample + Resolution),
+						GetTerrainBlendColor(Plan.Terrain, Sample + Resolution + 1)});
+					Tangents.Append({SampleTangents[Sample], SampleTangents[Sample + 1],
+						SampleTangents[Sample + Resolution], SampleTangents[Sample + Resolution + 1]});
+				}
+			}
+			if (!Vertices.IsEmpty())
+			{
+				TerrainMesh->CreateMeshSection_LinearColor(
+					SurfaceIndex, Vertices, Triangles, Normals, UVs, Colors, Tangents, true);
+			}
 		}
-		else
+		UMaterialInstanceDynamic* Grass = MakeSurfaceMaterial(this, Profile,
+			Profile->Surfaces[0].BaseColorTexture, Profile->Surfaces[0].NormalTexture, 0.93f, 1.05f);
+		UMaterialInstanceDynamic* Gravel = MakeSurfaceMaterial(this, Profile,
+			Profile->Surfaces[1].BaseColorTexture, Profile->Surfaces[1].NormalTexture, 0.9f, 1.15f);
+		UMaterialInstanceDynamic* Paving = MakeSurfaceMaterial(this, Profile,
+			Profile->Surfaces[2].BaseColorTexture, Profile->Surfaces[2].NormalTexture, 0.82f, 1.1f);
+		UMaterialInstanceDynamic* Farm = MakeSurfaceMaterial(this, Profile,
+			Profile->Surfaces[3].BaseColorTexture, Profile->Surfaces[3].NormalTexture, 0.95f, 1.0f);
+		UMaterialInterface* Rock = Cast<UMaterialInterface>(Profile->RockMaterial.TryLoad());
+		for (int32 Index = 0; Index < 5; ++Index)
 		{
-			TerrainMesh->SetMaterial(Index, Material);
+			UMaterialInterface* Material = Index == 0 ? Grass : Index == 1 ? Gravel : Index == 2 ? Paving : Index == 3 ? Farm : Rock;
+			if (Material == nullptr)
+			{
+				OutReport.AddError(TEXT("generator.surface_material_missing"),
+					FString::Printf(TEXT("terrain.materials[%d]"), Index),
+					TEXT("StylizedVillage surface material or texture could not load."));
+			}
+			else
+			{
+				TerrainMesh->SetMaterial(Index, Material);
+			}
 		}
 	}
 	TerrainMesh->UpdateBounds();
@@ -494,6 +1300,10 @@ bool AWorldDirectorTownActor::BuildTerrainAndSurfaces(
 	if (!OutReport.bValid)
 	{
 		TerrainMesh->ClearAllMeshSections();
+		if (HorizonTerrainMesh != nullptr)
+		{
+			HorizonTerrainMesh->ClearAllMeshSections();
+		}
 		return false;
 	}
 	// Commit the terrain replacement only after its recipe and every material
@@ -513,43 +1323,155 @@ bool AWorldDirectorTownActor::BuildTerrainAndSurfaces(
 
 void AWorldDirectorTownActor::BuildRouteSurfaces(const FResolvedWorldPlan& Plan)
 {
+	RouteMesh->ClearAllMeshSections();
+	PavingMesh->ClearAllMeshSections();
+	FarmMesh->ClearAllMeshSections();
+	WaterMesh->ClearAllMeshSections();
+	const UWorldEnvironmentProfile* Profile = UWorldEnvironmentProfile::ResolveStylizedVillage();
 	TArray<FVector> Vertices;
 	TArray<int32> Triangles;
 	TArray<FVector> Normals;
 	TArray<FVector2D> UVs;
 	TArray<FLinearColor> Colors;
 	TArray<FProcMeshTangent> Tangents;
-	float U = 0.0f;
 	for (const FResolvedRoutePlan& Route : Plan.Routes)
 	{
-		for (int32 Index = 1; Index < Route.ControlPoints.Num(); ++Index)
+		AddFeatheredRoutePolyline(Vertices, Triangles, Normals, UVs, Colors, Tangents,
+			Plan.Terrain, Route.ControlPoints, Route.WidthCentimeters * 0.5f, 2.0f);
+	}
+	TArray<FVector2D> JunctionCenters;
+	TArray<float> JunctionRadii;
+	auto QueueJunction = [&](const FVector2D& Center, const float Radius)
+	{
+		for (int32 Index = 0; Index < JunctionCenters.Num(); ++Index)
 		{
-			FVector Start = Route.ControlPoints[Index - 1];
-			FVector End = Route.ControlPoints[Index];
-			Start.Z += 9.0f;
-			End.Z += 9.0f;
-			const float NextU = U + FVector::Distance(Start, End) / 500.0f;
-			AddRibbonSegment(Vertices, Triangles, Normals, UVs, Colors, Tangents, Start, End, Route.WidthCentimeters * 0.5f, U, NextU);
-			U = NextU;
+			if (FVector2D::Distance(JunctionCenters[Index], Center) <=
+				FMath::Max(180.0f, FMath::Min(JunctionRadii[Index], Radius) * 0.7f))
+			{
+				JunctionRadii[Index] = FMath::Max(JunctionRadii[Index], Radius);
+				return;
+			}
+		}
+		JunctionCenters.Add(Center);
+		JunctionRadii.Add(Radius);
+	};
+	for (int32 RouteIndex = 0; RouteIndex < Plan.Routes.Num(); ++RouteIndex)
+	{
+		const FResolvedRoutePlan& Route = Plan.Routes[RouteIndex];
+		if (Route.ControlPoints.IsEmpty())
+		{
+			continue;
+		}
+		auto TouchesEarlierNetwork = [&](const FVector2D& Endpoint)
+		{
+			for (int32 EarlierIndex = 0; EarlierIndex < RouteIndex; ++EarlierIndex)
+			{
+				const FResolvedRoutePlan& EarlierRoute = Plan.Routes[EarlierIndex];
+				for (int32 SegmentIndex = 1;
+					SegmentIndex < EarlierRoute.ControlPoints.Num(); ++SegmentIndex)
+				{
+					if (DistanceToRouteSegment2D(
+						Endpoint,
+						FVector2D(EarlierRoute.ControlPoints[SegmentIndex - 1]),
+						FVector2D(EarlierRoute.ControlPoints[SegmentIndex])) <= 120.0f)
+					{
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+		const float JunctionRadius = Route.WidthCentimeters * 0.62f;
+		if (TouchesEarlierNetwork(FVector2D(Route.ControlPoints[0])))
+		{
+			QueueJunction(FVector2D(Route.ControlPoints[0]), JunctionRadius);
+		}
+		if (TouchesEarlierNetwork(FVector2D(Route.ControlPoints.Last())))
+		{
+			QueueJunction(FVector2D(Route.ControlPoints.Last()), JunctionRadius);
 		}
 	}
+	for (int32 Index = 0; Index < JunctionCenters.Num(); ++Index)
+	{
+		AddRouteJunction(Vertices, Triangles, Normals, UVs, Colors, Tangents,
+			Plan.Terrain, JunctionCenters[Index], JunctionRadii[Index]);
+	}
+	const int32 JunctionCount = JunctionCenters.Num();
 	if (!Vertices.IsEmpty())
 	{
 		RouteMesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
-		const UWorldEnvironmentProfile* Profile = UWorldEnvironmentProfile::ResolveStylizedVillage();
-		if (Profile != nullptr && Profile->Surfaces.Num() >= 2)
+		if (Profile != nullptr)
 		{
-			if (UMaterialInstanceDynamic* Gravel = MakeSurfaceMaterial(
-				this, Profile, Profile->Surfaces[1].BaseColorTexture, Profile->Surfaces[1].NormalTexture))
+			if (UMaterialInterface* TerrainBlend =
+				Cast<UMaterialInterface>(Profile->TerrainBlendMaterial.TryLoad()))
 			{
-				RouteMesh->SetMaterial(0, Gravel);
+				RouteMesh->SetMaterial(0, TerrainBlend);
 			}
 		}
+		RouteMesh->UpdateBounds();
+		RouteMesh->MarkRenderStateDirty();
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_ROUTE_SURFACE routes=%d junctions=%d vertices=%d triangles=%d collision=0 navigation=0"),
+			Plan.Routes.Num(), JunctionCount, Vertices.Num(), Triangles.Num() / 3);
+	}
+
+	Vertices.Reset(); Triangles.Reset(); Normals.Reset(); UVs.Reset(); Colors.Reset(); Tangents.Reset();
+	int32 CourtyardCount = 0;
+	for (const FResolvedLocationPlan& Location : Plan.Locations)
+	{
+		const bool bLandmark = Location.LocationId == Plan.LandmarkLocationId;
+		if (!Location.bPavedCourtyard)
+		{
+			continue;
+		}
+		AddCourtyard(Vertices, Triangles, Normals, UVs, Colors, Tangents,
+			Plan.Terrain, Location, bLandmark);
+		++CourtyardCount;
+	}
+	if (!Vertices.IsEmpty())
+	{
+		PavingMesh->CreateMeshSection_LinearColor(
+			0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
+		if (UMaterialInterface* Paving = Profile
+			? Cast<UMaterialInterface>(Profile->PavingMaterial.TryLoad()) : nullptr)
+		{
+			PavingMesh->SetMaterial(0, Paving);
+		}
+		PavingMesh->UpdateBounds();
+		PavingMesh->MarkRenderStateDirty();
+		const FString PavingMaterialName = PavingMesh->GetMaterial(0)
+			? PavingMesh->GetMaterial(0)->GetPathName() : TEXT("missing");
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_COURTYARD_COMPOSITION courtyards=%d vertices=%d triangles=%d material=%s boundsZ=(%.0f,%.0f) collision=0 navigation=0"),
+			CourtyardCount, Vertices.Num(), Triangles.Num() / 3, *PavingMaterialName,
+			PavingMesh->Bounds.Origin.Z - PavingMesh->Bounds.BoxExtent.Z,
+			PavingMesh->Bounds.Origin.Z + PavingMesh->Bounds.BoxExtent.Z);
+	}
+
+	Vertices.Reset(); Triangles.Reset(); Normals.Reset(); UVs.Reset(); Colors.Reset(); Tangents.Reset();
+	for (const FWorldDirectorFarmParcel& Parcel : Plan.Terrain.FarmParcels)
+	{
+		AddFarmParcelSurface(Vertices, Triangles, Normals, UVs, Colors, Tangents,
+			Plan.Terrain, Parcel);
+	}
+	if (!Vertices.IsEmpty())
+	{
+		FarmMesh->CreateMeshSection_LinearColor(
+			0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
+		if (UMaterialInterface* TerrainBlend = Profile
+			? Cast<UMaterialInterface>(Profile->TerrainBlendMaterial.TryLoad()) : nullptr)
+		{
+			FarmMesh->SetMaterial(0, TerrainBlend);
+		}
+		FarmMesh->UpdateBounds();
+		FarmMesh->MarkRenderStateDirty();
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_FARM_SURFACE parcels=%d vertices=%d triangles=%d collision=0 navigation=0"),
+			Plan.Terrain.FarmParcels.Num(), Vertices.Num(), Triangles.Num() / 3);
 	}
 	if (Plan.Terrain.WaterLevelCentimeters != INDEX_NONE)
 	{
 		Vertices.Reset(); Triangles.Reset(); Normals.Reset(); UVs.Reset(); Colors.Reset(); Tangents.Reset();
-		U = 0.0f;
 		const int32 Resolution = Plan.Terrain.Resolution;
 		const float Step = 2.0f * Plan.Terrain.ExtentCentimeters / FMath::Max(1, Resolution - 1);
 		const float WaterZ = Plan.Terrain.WaterLevelCentimeters + 18.0f;
@@ -570,7 +1492,10 @@ void AWorldDirectorTownActor::BuildRouteSurfaces(const FResolvedWorldPlan& Plan)
 					FVector(X0, Y0 + Step, WaterZ), FVector(X0 + Step, Y0 + Step, WaterZ)});
 				Triangles.Append({Base, Base + 2, Base + 1, Base + 1, Base + 2, Base + 3});
 				Normals.Append({FVector::UpVector, FVector::UpVector, FVector::UpVector, FVector::UpVector});
-				UVs.Append({FVector2D(0, 0), FVector2D(1, 0), FVector2D(0, 1), FVector2D(1, 1)});
+				UVs.Append({FVector2D(X0 / 800.0f, Y0 / 800.0f),
+					FVector2D((X0 + Step) / 800.0f, Y0 / 800.0f),
+					FVector2D(X0 / 800.0f, (Y0 + Step) / 800.0f),
+					FVector2D((X0 + Step) / 800.0f, (Y0 + Step) / 800.0f)});
 				Colors.Append({FLinearColor::White, FLinearColor::White, FLinearColor::White, FLinearColor::White});
 				Tangents.Append({FProcMeshTangent(1, 0, 0), FProcMeshTangent(1, 0, 0),
 					FProcMeshTangent(1, 0, 0), FProcMeshTangent(1, 0, 0)});
@@ -580,24 +1505,26 @@ void AWorldDirectorTownActor::BuildRouteSurfaces(const FResolvedWorldPlan& Plan)
 		// only a fallback for an older recipe without a classified water surface;
 		// drawing both would overlap coplanar triangles and shimmer.
 		const float HalfWidth = Plan.Terrain.Archetype == EWorldDirectorTerrainArchetype::Coast ? 6200.0f : 520.0f;
-		for (int32 Index = Vertices.IsEmpty() ? 1 : Plan.Terrain.WaterControlPoints.Num();
-			Index < Plan.Terrain.WaterControlPoints.Num(); ++Index)
+		if (Vertices.IsEmpty() && Plan.Terrain.WaterControlPoints.Num() >= 2)
 		{
-			const FVector Start = Plan.Terrain.WaterControlPoints[Index - 1] + FVector(0, 0, 18);
-			const FVector End = Plan.Terrain.WaterControlPoints[Index] + FVector(0, 0, 18);
-			const float NextU = U + FVector::Distance(Start, End) / 800.0f;
-			AddRibbonSegment(Vertices, Triangles, Normals, UVs, Colors, Tangents, Start, End, HalfWidth, U, NextU);
-			U = NextU;
+			TArray<FVector> WaterPoints = Plan.Terrain.WaterControlPoints;
+			for (FVector& Point : WaterPoints)
+			{
+				Point.Z = WaterZ;
+			}
+			AddRibbonPolyline(Vertices, Triangles, Normals, UVs, Colors, Tangents,
+				WaterPoints, HalfWidth, 800.0f, 0.0f);
 		}
 		if (!Vertices.IsEmpty())
 		{
 			WaterMesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false);
 		}
-		const UWorldEnvironmentProfile* Profile = UWorldEnvironmentProfile::ResolveStylizedVillage();
 		if (UMaterialInterface* Water = Profile ? Cast<UMaterialInterface>(Profile->WaterMaterial.TryLoad()) : nullptr)
 		{
 			WaterMesh->SetMaterial(0, Water);
 		}
+		WaterMesh->UpdateBounds();
+		WaterMesh->MarkRenderStateDirty();
 	}
 }
 
@@ -605,6 +1532,7 @@ void AWorldDirectorTownActor::BuildDressing(
 	const FResolvedWorldPlan& Plan,
 	FValidationReport& OutReport)
 {
+	TMap<UStaticMesh*, TArray<FTransform>> TransformsByMesh;
 	for (int32 Index = 0; Index < Plan.Dressing.Num(); ++Index)
 	{
 		const FWorldDirectorDressingInstance& Instance = Plan.Dressing[Index];
@@ -614,20 +1542,55 @@ void AWorldDirectorTownActor::BuildDressing(
 			OutReport.AddError(TEXT("generator.dressing_asset_missing"), FString::Printf(TEXT("dressing[%d]"), Index), Instance.MeshAsset.ToString());
 			continue;
 		}
-		TObjectPtr<UInstancedStaticMeshComponent>& ComponentPtr = DressingInstanceComponents.FindOrAdd(Mesh);
+		TransformsByMesh.FindOrAdd(Mesh).Add(Instance.Transform);
+	}
+
+	for (TPair<UStaticMesh*, TArray<FTransform>>& Pair : TransformsByMesh)
+	{
+		UStaticMesh* Mesh = Pair.Key;
+		const FString MeshName = Mesh->GetName().ToUpper();
+		int32 StartCullDistance = 28000;
+		int32 EndCullDistance = 78000;
+		if (MeshName.Contains(TEXT("TREE_VILLAGE")))
+		{
+			StartCullDistance = 52000;
+			EndCullDistance = 145000;
+		}
+		else if (MeshName.Contains(TEXT("PLANT_")))
+		{
+			StartCullDistance = 9000;
+			EndCullDistance = 28000;
+		}
+		else if (MeshName.Contains(TEXT("STONE_")) ||
+			MeshName.Contains(TEXT("TREETRUNK")) || MeshName.Contains(TEXT("HAY_")))
+		{
+			StartCullDistance = 16000;
+			EndCullDistance = 48000;
+		}
+		else if (MeshName.Contains(TEXT("FENCE_")))
+		{
+			StartCullDistance = 25000;
+			EndCullDistance = 68000;
+		}
+		TObjectPtr<UHierarchicalInstancedStaticMeshComponent>& ComponentPtr =
+			DressingInstanceComponents.FindOrAdd(Mesh);
 		if (ComponentPtr == nullptr)
 		{
-			ComponentPtr = NewObject<UInstancedStaticMeshComponent>(this);
-			UInstancedStaticMeshComponent* Component = ComponentPtr.Get();
+			ComponentPtr = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
+			UHierarchicalInstancedStaticMeshComponent* Component = ComponentPtr.Get();
 			Component->SetStaticMesh(Mesh);
 			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 			Component->SetCanEverAffectNavigation(false);
+			Component->SetCullDistances(StartCullDistance, EndCullDistance);
+			Component->SetMobility(GetRootComponent()->Mobility);
+			Component->SetCastShadow(!Mesh->GetName().Contains(TEXT("PLANT"), ESearchCase::IgnoreCase));
 			Component->SetupAttachment(GetRootComponent());
 			AddInstanceComponent(Component);
 			Component->RegisterComponent();
 		}
-		UInstancedStaticMeshComponent* Component = ComponentPtr.Get();
-		Component->AddInstance(Instance.Transform, true);
+		UHierarchicalInstancedStaticMeshComponent* Component = ComponentPtr.Get();
+		Component->AddInstances(Pair.Value, false, true, false);
+		Component->BuildTreeIfOutdated(false, true);
 	}
 }
 
@@ -693,33 +1656,76 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 		OutReport.AddError(TEXT("compiler.world_missing"), TEXT("world"), TEXT("Town root is not in a UWorld."));
 		return false;
 	}
+	UNavigationSystemV1* Navigation = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	int32 NavigationBoundsCount = 0;
+	for (TActorIterator<ANavMeshBoundsVolume> It(World); It; ++It)
+	{
+		ANavMeshBoundsVolume* Bounds = *It;
+		if (Bounds == nullptr)
+		{
+			continue;
+		}
+		++NavigationBoundsCount;
+		const FBox CurrentBounds = Bounds->GetComponentsBoundingBox(true);
+		const FVector CurrentSize = CurrentBounds.GetSize();
+		const float DesiredXY = Plan.Terrain.ExtentCentimeters * 2.0f + 2400.0f;
+		const float DesiredZ = FMath::Max(4000.0f,
+			static_cast<float>(Plan.Terrain.MaximumHeightCentimeters -
+				Plan.Terrain.MinimumHeightCentimeters) + 4000.0f);
+		const FVector Scale = Bounds->GetActorScale3D();
+		Bounds->SetActorScale3D(Scale * FVector(
+			CurrentSize.X > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredXY / CurrentSize.X) : 1.0f,
+			CurrentSize.Y > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredXY / CurrentSize.Y) : 1.0f,
+			CurrentSize.Z > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredZ / CurrentSize.Z) : 1.0f));
+		FVector BoundsCenter = GetActorLocation();
+		BoundsCenter.Z += (Plan.Terrain.MinimumHeightCentimeters +
+			Plan.Terrain.MaximumHeightCentimeters) * 0.5f;
+		Bounds->SetActorLocation(BoundsCenter, false, nullptr, ETeleportType::TeleportPhysics);
+		if (Navigation != nullptr)
+		{
+			Navigation->OnNavigationBoundsUpdated(Bounds);
+		}
+		const FBox UpdatedBounds = Bounds->GetComponentsBoundingBox(true);
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_NAV_BOUNDS actor=%s min=(%.0f,%.0f,%.0f) max=(%.0f,%.0f,%.0f) desiredXY=%.0f desiredZ=%.0f"),
+			*Bounds->GetName(), UpdatedBounds.Min.X, UpdatedBounds.Min.Y, UpdatedBounds.Min.Z,
+			UpdatedBounds.Max.X, UpdatedBounds.Max.Y, UpdatedBounds.Max.Z, DesiredXY, DesiredZ);
+	}
+	if (NavigationBoundsCount == 0)
+	{
+		// A navigation volume is required for the playable map, but rendering and
+		// asset-spawn fixtures intentionally use transient worlds without one.
+		// Keep construction available there and let the dedicated navigation gate
+		// report the missing runtime capability.
+		OutReport.AddWarning(TEXT("navigation.bounds_missing"), TEXT("navigation"),
+			TEXT("The generated world has no runtime navigation bounds volume; navigation validation will fail."));
+	}
 	if (!BuildTerrainAndSurfaces(Plan, OutReport))
 	{
 		return false;
 	}
 	BuildRouteSurfaces(Plan);
 	BuildDressing(Plan, OutReport);
-	for (TActorIterator<ANavMeshBoundsVolume> It(World); It; ++It)
+	int32 CollisionTriangleCount = 0;
+	for (int32 SectionIndex = 0; SectionIndex < TerrainMesh->GetNumSections(); ++SectionIndex)
 	{
-		ANavMeshBoundsVolume* Bounds = *It;
-		if (Bounds != nullptr)
+		if (const FProcMeshSection* Section = TerrainMesh->GetProcMeshSection(SectionIndex);
+			Section != nullptr && Section->bEnableCollision)
 		{
-			const FBox CurrentBounds = Bounds->GetComponentsBoundingBox(true);
-			const FVector CurrentSize = CurrentBounds.GetSize();
-			const float DesiredXY = Plan.Terrain.ExtentCentimeters * 2.0f + 2400.0f;
-			const float DesiredZ = FMath::Max(3200.0f,
-				static_cast<float>(Plan.Terrain.MaximumHeightCentimeters - Plan.Terrain.MinimumHeightCentimeters) + 2200.0f);
-			const FVector Scale = Bounds->GetActorScale3D();
-			Bounds->SetActorScale3D(Scale * FVector(
-				CurrentSize.X > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredXY / CurrentSize.X) : 1.0f,
-				CurrentSize.Y > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredXY / CurrentSize.Y) : 1.0f,
-				CurrentSize.Z > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredZ / CurrentSize.Z) : 1.0f));
-			if (UNavigationSystemV1* Navigation = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
-			{
-				Navigation->OnNavigationBoundsUpdated(Bounds);
-			}
+			CollisionTriangleCount += Section->ProcIndexBuffer.Num() / 3;
 		}
 	}
+	const ARecastNavMesh* Recast = Navigation != nullptr
+		? Cast<ARecastNavMesh>(Navigation->GetDefaultNavDataInstance(FNavigationSystem::DontCreate)) : nullptr;
+	const FBox TerrainBounds = TerrainMesh->Bounds.GetBox();
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_NAV_TERRAIN relevant=%d canAffect=%d collision=%d triangles=%d boundsMin=(%.0f,%.0f,%.0f) boundsMax=(%.0f,%.0f,%.0f) tileSize=%.0f"),
+		static_cast<int32>(TerrainMesh->IsNavigationRelevant()),
+		static_cast<int32>(TerrainMesh->CanEverAffectNavigation()),
+		static_cast<int32>(TerrainMesh->ContainsPhysicsTriMeshData(false)), CollisionTriangleCount,
+		TerrainBounds.Min.X, TerrainBounds.Min.Y, TerrainBounds.Min.Z,
+		TerrainBounds.Max.X, TerrainBounds.Max.Y, TerrainBounds.Max.Z,
+		Recast != nullptr ? Recast->GetTileSizeUU() : 0.0f);
 
 	for (int32 Index = 0; Index < Plan.Locations.Num(); ++Index)
 	{
@@ -751,7 +1757,6 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 			OutReport.AddError(TEXT("compiler.spawn_failed"), FString::Printf(TEXT("locations[%d]"), Index), TEXT("Could not spawn the resolved shell and interior pair."));
 			continue;
 		}
-
 		TArray<UStaticMeshComponent*> ShellComponents;
 		LocationActor->ShellActor->GetComponents(ShellComponents);
 		UStaticMeshComponent* VendorDoorComponent = nullptr;
@@ -862,6 +1867,20 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 				PlayerPawn->SetActorLocation(Arrival, false, nullptr, ETeleportType::TeleportPhysics);
 			}
 		}
+	}
+	if (Navigation != nullptr)
+	{
+		// Registration may have occurred before the resized bounds request is
+		// consumed. Refresh the final collision payload and dirty the complete
+		// terrain once every runtime obstacle has been spawned.
+		UNavigationSystemV1::UpdateComponentInNavOctree(*TerrainMesh);
+		Navigation->AddDirtyArea(
+			TerrainMesh->Bounds.GetBox(), ENavigationDirtyFlag::All,
+			FName(TEXT("WorldDirectorTerrainReady")));
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_NAV_REBUILD_QUEUED building=%d locations=%d residents=%d"),
+			static_cast<int32>(UNavigationSystemV1::IsNavigationBeingBuilt(World)),
+			SpawnedLocations.Num(), SpawnedResidents.Num());
 	}
 
 	OutReport.bValid = !OutReport.Issues.ContainsByPredicate(
@@ -1109,12 +2128,29 @@ FValidationReport AWorldDirectorTownActor::ValidateNavigationViability() const
 {
 	FValidationReport Report;
 	const UWorld* World = GetWorld();
-	const UNavigationSystemV1* Navigation = World ? FNavigationSystem::GetCurrent<UNavigationSystemV1>(World) : nullptr;
+	UWorld* MutableWorld = const_cast<UWorld*>(World);
+	UNavigationSystemV1* Navigation = MutableWorld
+		? FNavigationSystem::GetCurrent<UNavigationSystemV1>(MutableWorld) : nullptr;
 	if (Navigation == nullptr)
 	{
 		Report.AddError(TEXT("navigation.system_missing"), TEXT("navigation"), TEXT("No navigation system is available for the generated town."));
 		return Report;
 	}
+	const ARecastNavMesh* Recast = Cast<ARecastNavMesh>(
+		Navigation->GetDefaultNavDataInstance(FNavigationSystem::DontCreate));
+	const FBox NavBounds = Recast != nullptr ? Recast->GetNavMeshBounds() : FBox(ForceInit);
+	const FBox TerrainBounds = TerrainMesh != nullptr ? TerrainMesh->Bounds.GetBox() : FBox(ForceInit);
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_NAV_VALIDATE building=%d navData=%s tileSize=%.0f navMin=(%.0f,%.0f,%.0f) navMax=(%.0f,%.0f,%.0f) terrainRelevant=%d terrainCollision=%d terrainMin=(%.0f,%.0f,%.0f) terrainMax=(%.0f,%.0f,%.0f)"),
+		static_cast<int32>(UNavigationSystemV1::IsNavigationBeingBuilt(MutableWorld)),
+		Recast != nullptr ? *Recast->GetName() : TEXT("none"),
+		Recast != nullptr ? Recast->GetTileSizeUU() : 0.0f,
+		NavBounds.Min.X, NavBounds.Min.Y, NavBounds.Min.Z,
+		NavBounds.Max.X, NavBounds.Max.Y, NavBounds.Max.Z,
+		static_cast<int32>(TerrainMesh != nullptr && TerrainMesh->IsNavigationRelevant()),
+		static_cast<int32>(TerrainMesh != nullptr && TerrainMesh->ContainsPhysicsTriMeshData(false)),
+		TerrainBounds.Min.X, TerrainBounds.Min.Y, TerrainBounds.Min.Z,
+		TerrainBounds.Max.X, TerrainBounds.Max.Y, TerrainBounds.Max.Z);
 
 	TMap<FString, FVector> Entrances;
 	for (const AWorldDirectorLocationActor* Location : SpawnedLocations)
@@ -1122,8 +2158,15 @@ FValidationReport AWorldDirectorTownActor::ValidateNavigationViability() const
 		if (Location != nullptr && Location->DoorActor != nullptr)
 		{
 			FNavLocation ProjectedEntrance;
-			if (Navigation->ProjectPointToNavigation(
-				Location->NavigationEntranceLocation, ProjectedEntrance, FVector(250.0, 250.0, 500.0)))
+			const bool bEntranceProjected = Navigation->ProjectPointToNavigation(
+				Location->NavigationEntranceLocation, ProjectedEntrance, FVector(250.0, 250.0, 500.0));
+			UE_LOG(LogWorldDirector, Display,
+				TEXT("WORLD_DIRECTOR_ENTRANCE_PROBE location=%s query=(%.0f,%.0f,%.0f) projected=%d result=(%.0f,%.0f,%.0f)"),
+				*Location->LocationId,
+				Location->NavigationEntranceLocation.X, Location->NavigationEntranceLocation.Y,
+				Location->NavigationEntranceLocation.Z, static_cast<int32>(bEntranceProjected),
+				ProjectedEntrance.Location.X, ProjectedEntrance.Location.Y, ProjectedEntrance.Location.Z);
+			if (bEntranceProjected)
 			{
 				Entrances.Add(Location->LocationId, ProjectedEntrance.Location);
 			}
@@ -1158,12 +2201,17 @@ FValidationReport AWorldDirectorTownActor::ValidateNavigationViability() const
 				if (!bSideAProjected || !bSideBProjected || ProjectedSeparation < 250.0)
 				{
 					UE_LOG(LogWorldDirector, Display,
-						TEXT("WORLD_DIRECTOR_DOOR_PROBE location=%s axis=%d projectedA=%d projectedB=%d separation=%.1f result=REJECT"),
-						*Location->LocationId, DoorAxisIndex, bSideAProjected, bSideBProjected, ProjectedSeparation);
+						TEXT("WORLD_DIRECTOR_DOOR_PROBE location=%s axis=%d queryA=(%.0f,%.0f,%.0f) queryB=(%.0f,%.0f,%.0f) projectedA=%d projectedB=%d separation=%.1f result=REJECT"),
+						*Location->LocationId, DoorAxisIndex,
+						(DoorLocation - DoorAxis * 250.0).X, (DoorLocation - DoorAxis * 250.0).Y,
+						(DoorLocation - DoorAxis * 250.0).Z, (DoorLocation + DoorAxis * 250.0).X,
+						(DoorLocation + DoorAxis * 250.0).Y, (DoorLocation + DoorAxis * 250.0).Z,
+						static_cast<int32>(bSideAProjected), static_cast<int32>(bSideBProjected),
+						ProjectedSeparation);
 					continue;
 				}
 				UNavigationPath* DoorPath = Navigation->FindPathToLocationSynchronously(
-					const_cast<UWorld*>(World), SideA.Location, SideB.Location);
+					MutableWorld, SideA.Location, SideB.Location);
 				if (DoorPath == nullptr || !DoorPath->IsValid() || DoorPath->IsPartial())
 				{
 					UE_LOG(LogWorldDirector, Display,
@@ -1277,6 +2325,11 @@ void AWorldDirectorFixtureBootstrap::EndPlay(const EEndPlayReason::Type EndPlayR
 	if (GenerationDiagnosticsWidget != nullptr)
 	{
 		GenerationDiagnosticsWidget->RemoveFromParent();
+	}
+	if (AutomatedVisualCaptureCamera.IsValid())
+	{
+		AutomatedVisualCaptureCamera->Destroy();
+		AutomatedVisualCaptureCamera.Reset();
 	}
 	Super::EndPlay(EndPlayReason);
 }
@@ -1460,7 +2513,9 @@ void AWorldDirectorFixtureBootstrap::OpenWorldCreationMenu()
 		}
 		CreateWorldWidget->AddToViewport(100);
 	}
-	if (CreateWorldWidget != nullptr && !CreateWorldWidget->ApplyViewportLayout() &&
+	const bool bViewportLayoutApplied = CreateWorldWidget != nullptr &&
+		CreateWorldWidget->ApplyViewportLayout();
+	if (CreateWorldWidget != nullptr && !bViewportLayoutApplied && FApp::CanEverRender() &&
 		!GetWorldTimerManager().IsTimerActive(CreationMenuRetryHandle))
 	{
 		GetWorldTimerManager().SetTimer(CreationMenuRetryHandle, this,
@@ -1805,6 +2860,18 @@ void AWorldDirectorFixtureBootstrap::DestroyCurrentTown()
 
 void AWorldDirectorFixtureBootstrap::RunAutomatedPlayerFlowCheck()
 {
+	if (UWorld* World = GetWorld(); World != nullptr &&
+		UNavigationSystemV1::IsNavigationBeingBuilt(World) && PlayerFlowNavigationRetryCount < 20)
+	{
+		++PlayerFlowNavigationRetryCount;
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_PLAYER_FLOW_NAV_WAIT attempt=%d max=20 state=BUILDING"),
+			PlayerFlowNavigationRetryCount);
+		FTimerHandle TimerHandle;
+		GetWorldTimerManager().SetTimer(
+			TimerHandle, this, &AWorldDirectorFixtureBootstrap::RunAutomatedPlayerFlowCheck, 1.0f, false);
+		return;
+	}
 	OpenGenerationDiagnostics();
 	const bool bDiagnosticsReady = GenerationDiagnosticsWidget != nullptr &&
 		GenerationDiagnosticsWidget->IsDiagnosticsReady();
@@ -2391,10 +3458,207 @@ void AWorldDirectorFixtureBootstrap::RunAutomatedVisualCapture()
 		const int32 Noon = 12 * 60;
 		Simulation->AdvanceSimulationMinutes((Noon - Simulation->GetMinuteOfDay() + 1440) % 1440);
 	}
-	const FString ScreenshotPath = FPaths::Combine(
+	UWorld* World = GetWorld();
+	APlayerController* PlayerController = World ? World->GetFirstPlayerController() : nullptr;
+	if (CompiledTown == nullptr || CompiledTown->TerrainMesh == nullptr || PlayerController == nullptr)
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=FAIL reason=camera_context_missing"));
+		FGenericPlatformMisc::RequestExitWithStatus(false, 5);
+		return;
+	}
+
+	AutomatedVisualCaptureView = TEXT("overview");
+	FParse::Value(FCommandLine::Get(), TEXT("WorldDirectorVisualView="), AutomatedVisualCaptureView);
+	AutomatedVisualCaptureView.TrimStartAndEndInline();
+	AutomatedVisualCaptureView.ToLowerInline();
+
+	const FBox TerrainBounds = CompiledTown->TerrainMesh->Bounds.GetBox();
+	if (!TerrainBounds.IsValid)
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=FAIL reason=terrain_bounds_invalid"));
+		FGenericPlatformMisc::RequestExitWithStatus(false, 5);
+		return;
+	}
+	FVector SettlementFocus = FVector::ZeroVector;
+	FBox SettlementBounds(ForceInit);
+	int32 FocusLocationCount = 0;
+	for (const AWorldDirectorLocationActor* Location : CompiledTown->SpawnedLocations)
+	{
+		if (Location != nullptr)
+		{
+			SettlementFocus += Location->GetActorLocation();
+			FVector LocationOrigin;
+			FVector LocationExtent;
+			const AActor* BoundsActor = Location->ShellActor != nullptr
+				? Location->ShellActor.Get() : static_cast<const AActor*>(Location);
+			BoundsActor->GetActorBounds(true, LocationOrigin, LocationExtent, true);
+			SettlementBounds += FBox::BuildAABB(LocationOrigin, LocationExtent);
+			++FocusLocationCount;
+		}
+	}
+	if (FocusLocationCount > 0)
+	{
+		SettlementFocus /= FocusLocationCount;
+	}
+	else
+	{
+		SettlementFocus = TerrainBounds.GetCenter();
+	}
+	SettlementFocus.Z += 700.0f;
+
+	FVector LandmarkFocus = SettlementFocus;
+	FVector LandmarkEntrance = SettlementFocus;
+	FVector LandmarkExtent(900.0f, 900.0f, 1200.0f);
+	for (const AWorldDirectorLocationActor* Location : CompiledTown->SpawnedLocations)
+	{
+		if (Location != nullptr && Location->LocationId == CompiledTown->LandmarkLocationId)
+		{
+			FVector LandmarkOrigin;
+			const AActor* BoundsActor = Location->ShellActor != nullptr
+				? Location->ShellActor.Get() : static_cast<const AActor*>(Location);
+			BoundsActor->GetActorBounds(true, LandmarkOrigin, LandmarkExtent, true);
+			LandmarkFocus = LandmarkOrigin + FVector(0.0f, 0.0f, LandmarkExtent.Z * 0.18f);
+			LandmarkEntrance = Location->DoorActor != nullptr
+				? Location->DoorActor->GetActorLocation() : Location->NavigationEntranceLocation;
+			break;
+		}
+	}
+
+	const float WorldSpan = FMath::Max(TerrainBounds.GetSize().X, TerrainBounds.GetSize().Y);
+	const float SettlementSpan = SettlementBounds.IsValid
+		? FMath::Max(16000.0f, FMath::Max(SettlementBounds.GetSize().X, SettlementBounds.GetSize().Y))
+		: WorldSpan * 0.32f;
+	FVector CameraTarget = FMath::Lerp(TerrainBounds.GetCenter(), SettlementFocus, 0.7f);
+	FVector CameraLocation;
+	float FieldOfView = 64.0f;
+	if (AutomatedVisualCaptureView == TEXT("approach"))
+	{
+		CameraTarget = SettlementFocus;
+		CameraLocation = CameraTarget + FVector(-SettlementSpan * 0.5f, -SettlementSpan * 0.28f,
+			FMath::Max(1200.0f, SettlementSpan * 0.055f));
+		FieldOfView = 58.0f;
+	}
+	else if (AutomatedVisualCaptureView == TEXT("landmark") ||
+		AutomatedVisualCaptureView == TEXT("civic"))
+	{
+		CameraTarget = LandmarkFocus;
+		FVector ApproachAxis = (LandmarkEntrance - LandmarkFocus).GetSafeNormal2D();
+		if (ApproachAxis.IsNearlyZero())
+		{
+			ApproachAxis = FVector(-1.0f, -0.7f, 0.0f).GetSafeNormal();
+		}
+		const FVector ApproachSide(-ApproachAxis.Y, ApproachAxis.X, 0.0f);
+		const bool bCivicComposition = AutomatedVisualCaptureView == TEXT("civic");
+		const float FrameDistance = bCivicComposition
+			? FMath::Max(5600.0f, FMath::Max(LandmarkExtent.X, LandmarkExtent.Y) * 4.8f)
+			: FMath::Max(2600.0f, FMath::Max(LandmarkExtent.X, LandmarkExtent.Y) * 2.9f);
+		if (bCivicComposition)
+		{
+			CameraTarget = FMath::Lerp(LandmarkFocus, LandmarkEntrance, 0.55f) +
+				ApproachAxis * 520.0f + FVector(0.0f, 0.0f, 160.0f);
+		}
+		CameraLocation = LandmarkEntrance + ApproachAxis * FrameDistance +
+			ApproachSide * LandmarkExtent.X * (bCivicComposition ? 0.72f : 0.32f) +
+			FVector(0.0f, 0.0f, bCivicComposition ? 1850.0f : 360.0f);
+		FieldOfView = bCivicComposition ? 58.0f : 52.0f;
+	}
+	else if (AutomatedVisualCaptureView == TEXT("topdown"))
+	{
+		CameraTarget = SettlementFocus;
+		CameraLocation = CameraTarget + FVector(0.0f, 0.0f,
+			FMath::Max(26000.0f, SettlementSpan * 0.92f));
+		FieldOfView = 56.0f;
+	}
+	else
+	{
+		if (AutomatedVisualCaptureView != TEXT("overview"))
+		{
+			UE_LOG(LogWorldDirector, Warning,
+				TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE unknownView=%s fallback=overview"),
+				*AutomatedVisualCaptureView);
+			AutomatedVisualCaptureView = TEXT("overview");
+		}
+		CameraLocation = CameraTarget + FVector(-WorldSpan * 0.62f, -WorldSpan * 0.62f,
+			FMath::Max(30000.0f, WorldSpan * 0.52f));
+		CameraLocation.Z = FMath::Max(CameraLocation.Z,
+			TerrainBounds.Max.Z + FMath::Max(12000.0f, WorldSpan * 0.18f));
+	}
+
+	if (AutomatedVisualCaptureCamera.IsValid())
+	{
+		AutomatedVisualCaptureCamera->Destroy();
+	}
+	FActorSpawnParameters SpawnParameters;
+	SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ACameraActor* CaptureCamera = World->SpawnActor<ACameraActor>(
+		ACameraActor::StaticClass(), CameraLocation, (CameraTarget - CameraLocation).Rotation(), SpawnParameters);
+	if (CaptureCamera == nullptr)
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=FAIL reason=camera_spawn_failed"));
+		FGenericPlatformMisc::RequestExitWithStatus(false, 5);
+		return;
+	}
+	AutomatedVisualCaptureCamera = CaptureCamera;
+	CaptureCamera->SetActorEnableCollision(false);
+	CaptureCamera->GetCameraComponent()->SetFieldOfView(FieldOfView);
+	CaptureCamera->GetCameraComponent()->SetConstraintAspectRatio(false);
+	PlayerController->SetViewTargetWithBlend(CaptureCamera, 0.0f);
+	PlayerController->bShowMouseCursor = false;
+
+	AutomatedVisualCapturePath = FPaths::Combine(
 		FPaths::ProjectSavedDir(), TEXT("Screenshots/Mac/WorldDirectorPhase4.png"));
-	FScreenshotRequest::RequestScreenshot(ScreenshotPath, false, false);
-	UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_REQUESTED path=%s"), *ScreenshotPath);
+	FString RequestedOutput;
+	if (FParse::Value(FCommandLine::Get(), TEXT("WorldDirectorVisualOutput="), RequestedOutput) &&
+		!RequestedOutput.TrimStartAndEnd().IsEmpty())
+	{
+		RequestedOutput.TrimStartAndEndInline();
+		AutomatedVisualCapturePath = FPaths::IsRelative(RequestedOutput)
+			? FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots/Mac"), RequestedOutput)
+			: RequestedOutput;
+	}
+	if (FPaths::GetExtension(AutomatedVisualCapturePath).IsEmpty())
+	{
+		AutomatedVisualCapturePath += TEXT(".png");
+	}
+	FPaths::NormalizeFilename(AutomatedVisualCapturePath);
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(AutomatedVisualCapturePath), true);
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_VISUAL_CAMERA view=%s location=%s target=%s fov=%.1f output=%s"),
+		*AutomatedVisualCaptureView, *CameraLocation.ToCompactString(), *CameraTarget.ToCompactString(),
+		FieldOfView, *AutomatedVisualCapturePath);
+
+	// Let the new view target render and allow HISM/texture streaming to settle
+	// before requesting the frame. This avoids capturing the previous pawn view.
+	FTimerHandle TimerHandle;
+	GetWorldTimerManager().SetTimer(
+		TimerHandle, this, &AWorldDirectorFixtureBootstrap::CaptureAutomatedVisualFrame, 1.0f, false);
+}
+
+void AWorldDirectorFixtureBootstrap::CaptureAutomatedVisualFrame()
+{
+	if (AutomatedVisualCapturePath.IsEmpty())
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=FAIL reason=output_path_missing"));
+		FGenericPlatformMisc::RequestExitWithStatus(false, 5);
+		return;
+	}
+	if (IFileManager::Get().FileExists(*AutomatedVisualCapturePath) &&
+		!IFileManager::Get().Delete(*AutomatedVisualCapturePath, false, true, true))
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=FAIL reason=stale_output_could_not_be_replaced path=%s"),
+			*AutomatedVisualCapturePath);
+		FGenericPlatformMisc::RequestExitWithStatus(false, 5);
+		return;
+	}
+	FScreenshotRequest::RequestScreenshot(AutomatedVisualCapturePath, false, false);
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_REQUESTED view=%s path=%s"),
+		*AutomatedVisualCaptureView, *AutomatedVisualCapturePath);
 	FTimerHandle TimerHandle;
 	GetWorldTimerManager().SetTimer(
 		TimerHandle, this, &AWorldDirectorFixtureBootstrap::FinishAutomatedVisualCapture, 2.0f, false);
@@ -2402,5 +3666,20 @@ void AWorldDirectorFixtureBootstrap::RunAutomatedVisualCapture()
 
 void AWorldDirectorFixtureBootstrap::FinishAutomatedVisualCapture()
 {
-	FGenericPlatformMisc::RequestExitWithStatus(false, 0);
+	const int64 ScreenshotBytes = AutomatedVisualCapturePath.IsEmpty()
+		? INDEX_NONE : IFileManager::Get().FileSize(*AutomatedVisualCapturePath);
+	const bool bPassed = ScreenshotBytes > 1024;
+	if (bPassed)
+	{
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=PASS view=%s bytes=%lld path=%s"),
+			*AutomatedVisualCaptureView, ScreenshotBytes, *AutomatedVisualCapturePath);
+	}
+	else
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=FAIL view=%s bytes=%lld path=%s"),
+			*AutomatedVisualCaptureView, ScreenshotBytes, *AutomatedVisualCapturePath);
+	}
+	FGenericPlatformMisc::RequestExitWithStatus(false, bPassed ? 0 : 5);
 }

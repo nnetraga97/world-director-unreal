@@ -37,7 +37,19 @@ const FBuildingCapability BuildingCapabilities[] = {
 	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_Guildhall_01.BP_Cap_Workplace_Guildhall_01_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Workplace_Longhouse_01.BP_Interior_Workplace_Longhouse_01_C"), FVector2D(1238.0, 1633.0), true, true}
 };
 
-const int32 TraversableHomeCapabilityIndices[] = {0, 3};
+enum class EBuildingCapabilityIndex : uint8
+{
+	HomeCompact = 0,
+	HomeMultiwing = 3,
+	WorkplaceLonghouse = 5,
+	WorkplaceInn = 6,
+	WorkplaceGuildhall = 7
+};
+
+const int32 CertifiedHomeCapabilityIndices[] = {
+	static_cast<int32>(EBuildingCapabilityIndex::HomeCompact),
+	static_cast<int32>(EBuildingCapabilityIndex::HomeMultiwing)
+};
 
 const FCharacterFamily MaleCharacterFamilies[] = {
 	{TEXT("/Game/Vendor/Quaternius/Characters/Male/Farmer_Body.Farmer_Body"), TEXT("/Game/Vendor/Quaternius/Characters/Male/Parts/Farmer_Head.Farmer_Head"), TEXT("/Game/Vendor/Quaternius/Characters/Male/Parts/Farmer_Legs.Farmer_Legs"), TEXT("/Game/Vendor/Quaternius/Characters/Male/Parts/Farmer_Feet.Farmer_Feet")},
@@ -55,28 +67,123 @@ const FCharacterFamily FemaleCharacterFamilies[] = {
 
 bool IsWorkplace(const FWorldLocation& Location)
 {
-	// Every current non-residential purpose needs the certified public/workplace
-	// longhouse. Treating a clinic or shelter as a residence can select a home
-	// shell whose door is not traversable at the corresponding public plot.
 	return Location.PurposeTag != TEXT("Purpose.Home");
+}
+
+int32 CivicPavingPriority(const FWorldLocation& Location)
+{
+	if (Location.PurposeTag == TEXT("Purpose.Home"))
+	{
+		return INDEX_NONE;
+	}
+
+	FString SemanticIdentity = Location.Id + TEXT("|") + Location.DisplayName +
+		TEXT("|") + Location.PurposeTag.ToString();
+	SemanticIdentity.ToLowerInline();
+	if (SemanticIdentity.Contains(TEXT("market")) ||
+		SemanticIdentity.Contains(TEXT("square")) ||
+		SemanticIdentity.Contains(TEXT("plaza")) ||
+		SemanticIdentity.Contains(TEXT("council")))
+	{
+		return 0;
+	}
+	if (SemanticIdentity.Contains(TEXT("guild")) ||
+		SemanticIdentity.Contains(TEXT("inn")) ||
+		SemanticIdentity.Contains(TEXT("tavern")) ||
+		SemanticIdentity.Contains(TEXT("hall")))
+	{
+		return 1;
+	}
+	if (Location.PurposeTag == TEXT("Purpose.Headquarters") ||
+		Location.PurposeTag == TEXT("Purpose.Clinic"))
+	{
+		return 2;
+	}
+	if (Location.PurposeTag == TEXT("Purpose.Landmark"))
+	{
+		return 3;
+	}
+	return INDEX_NONE;
+}
+
+bool PrefersInnShell(const FWorldLocation& Location, const int32 WorldSeed)
+{
+	if (Location.PurposeTag == TEXT("Purpose.Clinic") ||
+		Location.PurposeTag == TEXT("Purpose.Shelter"))
+	{
+		return true;
+	}
+	if (Location.PurposeTag == TEXT("Purpose.Headquarters"))
+	{
+		return false;
+	}
+
+	FString SemanticIdentity = Location.Id + TEXT("|") + Location.DisplayName;
+	SemanticIdentity.ToLowerInline();
+	if (SemanticIdentity.Contains(TEXT("inn")) ||
+		SemanticIdentity.Contains(TEXT("market")) ||
+		SemanticIdentity.Contains(TEXT("ferry")) ||
+		SemanticIdentity.Contains(TEXT("healing")) ||
+		SemanticIdentity.Contains(TEXT("pilgrim")) ||
+		SemanticIdentity.Contains(TEXT("shelter")))
+	{
+		return true;
+	}
+	if (SemanticIdentity.Contains(TEXT("longhouse")) ||
+		SemanticIdentity.Contains(TEXT("mill")) ||
+		SemanticIdentity.Contains(TEXT("granary")) ||
+		SemanticIdentity.Contains(TEXT("watch")) ||
+		SemanticIdentity.Contains(TEXT("archive")))
+	{
+		return false;
+	}
+
+	const int32 LocationSeed = FWorldDirectorPhysicalGenerator::DeriveStageSeed(
+		WorldSeed, Location.Id + TEXT("|building-archetype"));
+	return (static_cast<uint32>(LocationSeed) & 1U) != 0;
 }
 
 const FBuildingCapability* ChooseCapability(
 	const FWorldLocation& Location,
 	int32 HomeOrdinal,
-	bool bLandmark)
+	bool bLandmark,
+	int32 WorldSeed,
+	int32& LonghouseUseCount,
+	int32& InnUseCount)
 {
 	if (bLandmark)
 	{
-		// The vendor guildhall remains available for remediation, but its doorway divides
-		// the runtime navmesh. The longhouse is the certified traversable landmark shell.
-		return &BuildingCapabilities[5];
+		// Reserve the civic-hall silhouette for the primary landmark. Keeping it out of
+		// every other selection pool makes the landmark readable from any approach.
+		return &BuildingCapabilities[static_cast<int32>(
+			EBuildingCapabilityIndex::WorkplaceGuildhall)];
 	}
 	if (IsWorkplace(Location))
 	{
-		return &BuildingCapabilities[5];
+		// Respect semantic purpose on a tie, then rebalance the two certified public
+		// archetypes. This preserves a coherent hierarchy without allowing a longhouse
+		// monoculture when an AI spec contains many generic public locations.
+		bool bUseInn = PrefersInnShell(Location, WorldSeed);
+		if (LonghouseUseCount < InnUseCount)
+		{
+			bUseInn = false;
+		}
+		else if (InnUseCount < LonghouseUseCount)
+		{
+			bUseInn = true;
+		}
+		if (bUseInn)
+		{
+			++InnUseCount;
+			return &BuildingCapabilities[static_cast<int32>(
+				EBuildingCapabilityIndex::WorkplaceInn)];
+		}
+		++LonghouseUseCount;
+		return &BuildingCapabilities[static_cast<int32>(
+			EBuildingCapabilityIndex::WorkplaceLonghouse)];
 	}
-	return &BuildingCapabilities[TraversableHomeCapabilityIndices[HomeOrdinal % UE_ARRAY_COUNT(TraversableHomeCapabilityIndices)]];
+	return &BuildingCapabilities[CertifiedHomeCapabilityIndices[
+		HomeOrdinal % UE_ARRAY_COUNT(CertifiedHomeCapabilityIndices)]];
 }
 
 bool VerifyAsset(const FSoftObjectPath& Path, const FString& PropertyPath, FValidationReport& Report)
@@ -152,17 +259,75 @@ bool FWorldDirectorCompiler::Resolve(
 
 	const uint32 StructureSeed = static_cast<uint32>(FWorldDirectorPhysicalGenerator::DeriveStageSeed(
 		Spec.Seed, TEXT("structures")));
-	int32 HomeOrdinal = static_cast<int32>(StructureSeed % UE_ARRAY_COUNT(TraversableHomeCapabilityIndices));
+	// Stone courts are semantic focal points, not a blanket treatment for every
+	// non-home shell. Keep the primary landmark and at most two ranked public
+	// satellites so grass, yards, and working ground remain the visual default.
+	TArray<int32> SecondaryPavingCandidates;
+	for (int32 Index = 0; Index < Spec.Locations.Num(); ++Index)
+	{
+		if (Spec.Locations[Index].Id != OutPlan.LandmarkLocationId &&
+			CivicPavingPriority(Spec.Locations[Index]) != INDEX_NONE)
+		{
+			SecondaryPavingCandidates.Add(Index);
+		}
+	}
+	SecondaryPavingCandidates.Sort([&](const int32 A, const int32 B)
+	{
+		const int32 PriorityA = CivicPavingPriority(Spec.Locations[A]);
+		const int32 PriorityB = CivicPavingPriority(Spec.Locations[B]);
+		if (PriorityA != PriorityB)
+		{
+			return PriorityA < PriorityB;
+		}
+		const uint32 SeedA = static_cast<uint32>(FWorldDirectorPhysicalGenerator::DeriveStageSeed(
+			Spec.Seed, Spec.Locations[A].Id + TEXT("|civic-paving")));
+		const uint32 SeedB = static_cast<uint32>(FWorldDirectorPhysicalGenerator::DeriveStageSeed(
+			Spec.Seed, Spec.Locations[B].Id + TEXT("|civic-paving")));
+		return SeedA != SeedB ? SeedA < SeedB : Spec.Locations[A].Id < Spec.Locations[B].Id;
+	});
+	TSet<FString> PavedLocationIds;
+	TArray<FString> OrderedPavedLocationIds;
+	if (!OutPlan.LandmarkLocationId.IsEmpty())
+	{
+		PavedLocationIds.Add(OutPlan.LandmarkLocationId);
+		OrderedPavedLocationIds.Add(OutPlan.LandmarkLocationId);
+	}
+	const int32 SecondaryPavingBudget = Spec.Locations.Num() >= 12 ? 2 : 1;
+	for (int32 CandidateIndex = 0;
+		CandidateIndex < SecondaryPavingCandidates.Num() &&
+		CandidateIndex < SecondaryPavingBudget;
+		++CandidateIndex)
+	{
+		const FString& LocationId = Spec.Locations[SecondaryPavingCandidates[CandidateIndex]].Id;
+		PavedLocationIds.Add(LocationId);
+		OrderedPavedLocationIds.Add(LocationId);
+	}
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_CIVIC_SURFACE_SELECTION secondaryBudget=%d count=%d locations=%s"),
+		SecondaryPavingBudget, OrderedPavedLocationIds.Num(),
+		*FString::Join(OrderedPavedLocationIds, TEXT(",")));
+	int32 HomeOrdinal = static_cast<int32>(StructureSeed % UE_ARRAY_COUNT(CertifiedHomeCapabilityIndices));
+	int32 LonghouseUseCount = 0;
+	int32 InnUseCount = 0;
+	int32 HomeShellEligibleCount = 0;
+	int32 PublicShellEligibleCount = 0;
+	int32 LandmarkShellEligibleCount = 0;
 	for (int32 Index = 0; Index < Spec.Locations.Num(); ++Index)
 	{
 		const FWorldLocation& Location = Spec.Locations[Index];
 		const bool bLandmark = OutPlan.LandmarkLocationId == Location.Id;
+		const bool bHome = !IsWorkplace(Location);
 		const FBuildingCapability* Capability = ChooseCapability(
-			Location, HomeOrdinal, bLandmark);
-		HomeOrdinal += IsWorkplace(Location) ? 0 : 1;
+			Location, HomeOrdinal, bLandmark, Spec.Seed, LonghouseUseCount, InnUseCount);
+		HomeOrdinal += !bLandmark && bHome ? 1 : 0;
+		LandmarkShellEligibleCount += bLandmark ? 1 : 0;
+		HomeShellEligibleCount += !bLandmark && bHome ? 1 : 0;
+		PublicShellEligibleCount += !bLandmark && !bHome ? 1 : 0;
 
 		FResolvedLocationPlan& Resolved = OutPlan.Locations.AddDefaulted_GetRef();
 		Resolved.LocationId = Location.Id;
+		Resolved.PurposeTag = Location.PurposeTag;
+		Resolved.bPavedCourtyard = PavedLocationIds.Contains(Location.Id);
 		Resolved.ShellAsset = FSoftObjectPath(Capability->ShellClass);
 		Resolved.InteriorAsset = FSoftObjectPath(Capability->InteriorClass);
 		Resolved.FootprintSize = Capability->Footprint;
@@ -191,15 +356,21 @@ bool FWorldDirectorCompiler::Resolve(
 		const int32 Count = ++ShellUseCounts.FindOrAdd(Location.ShellAsset.ToString());
 		MostRepeatedShellCount = FMath::Max(MostRepeatedShellCount, Count);
 	}
-	const int32 RepetitionLimit = FMath::Max(4, (OutPlan.Locations.Num() * 3 + 3) / 4);
+	const int32 RepetitionLimit = FMath::Max(3, (OutPlan.Locations.Num() + 2) / 3);
+	const int32 ExpectedDistinctShellCount =
+		FMath::Min(HomeShellEligibleCount,
+			static_cast<int32>(UE_ARRAY_COUNT(CertifiedHomeCapabilityIndices))) +
+		FMath::Min(PublicShellEligibleCount, 2) +
+		FMath::Min(LandmarkShellEligibleCount, 1);
 	if (MostRepeatedShellCount > RepetitionLimit ||
-		(OutPlan.Locations.Num() >= 12 && ShellUseCounts.Num() < 3))
+		ShellUseCounts.Num() < ExpectedDistinctShellCount)
 	{
 		OutReport.AddWarning(
 			TEXT("compiler.asset_overuse"), TEXT("locations"),
 			FString::Printf(
-				TEXT("Resolved town repeats one shell %d times across %d locations and uses %d distinct shells."),
-				MostRepeatedShellCount, OutPlan.Locations.Num(), ShellUseCounts.Num()));
+				TEXT("Resolved town repeats one shell %d times across %d locations (limit %d) and uses %d distinct shells (expected %d for the supplied purposes)."),
+				MostRepeatedShellCount, OutPlan.Locations.Num(), RepetitionLimit,
+				ShellUseCounts.Num(), ExpectedDistinctShellCount));
 	}
 
 	const FResolvedLocationPlan* LandmarkPlan = OutPlan.Locations.FindByPredicate(

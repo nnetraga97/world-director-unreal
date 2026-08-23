@@ -1403,6 +1403,8 @@ bool UDirectorBridgeSubsystem::BeginWorldGeneration(
 	GenerationStageTimeoutSeconds = FMath::Max(1.0f, StageTimeoutSeconds);
 	bFixtureProviderForTesting = bUseFixtureProviderForTesting;
 	RepairAttempt = 0;
+	ConsecutiveRepairIssueCount = 0;
+	LastRepairIssueSignature.Reset();
 	LastGenerationError.Reset();
 	GeneratedWorldSpec = FGeneratedWorldSpec();
 	LastResolvedWorldPlan = FResolvedWorldPlan();
@@ -1416,6 +1418,8 @@ bool UDirectorBridgeSubsystem::BeginWorldGeneration(
 	CurrentStageStartedAtSeconds = 0.0;
 	CurrentMetricIndex = INDEX_NONE;
 	SelectedLayoutCandidateId.Reset();
+	ActiveGenerationRequestId.Reset();
+	GenerationRequestSerial = 0;
 	GenerationRunId = FString::Printf(
 		TEXT("%s-%s"),
 		*FDateTime::UtcNow().ToString(TEXT("%Y%m%dT%H%M%SZ")),
@@ -1522,6 +1526,12 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 
 	const FString StageName = StageWireName();
 	const int32 Ordinal = StageFileOrdinal();
+	ActiveGenerationRequestId = FString::Printf(
+		TEXT("%s-%02d-%llu-%s"),
+		*GenerationRunId,
+		Ordinal,
+		static_cast<unsigned long long>(++GenerationRequestSerial),
+		*FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(8));
 	const FString Prefix = FString::Printf(TEXT("%02d-%s"), Ordinal, *StageName);
 	const FString RequestPath = FPaths::Combine(GenerationRunDirectory, Prefix + TEXT("-request.json"));
 	const FString ResponsePath = FPaths::Combine(GenerationRunDirectory, Prefix + TEXT("-response.json"));
@@ -1531,10 +1541,12 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	const TSharedRef<FJsonObject> Request = MakeShared<FJsonObject>();
 	Request->SetStringField(TEXT("stage"), StageName);
 	Request->SetStringField(TEXT("runId"), GenerationRunId);
+	Request->SetStringField(TEXT("requestId"), ActiveGenerationRequestId);
 	Request->SetStringField(TEXT("playerPrompt"), GenerationPlayerPrompt);
 	Request->SetStringField(TEXT("model"), GenerationModel);
 	Request->SetStringField(TEXT("reasoningEffort"), GenerationReasoningEffort);
 	Request->SetNumberField(TEXT("seed"), GenerationSeed);
+	Request->SetNumberField(TEXT("attempt"), RepairAttempt);
 	Request->SetStringField(
 		TEXT("providerMode"), bFixtureProviderForTesting ? TEXT("fixture") : TEXT("cli"));
 	Request->SetObjectField(TEXT("current"), WorkingGenerationDocument);
@@ -1561,6 +1573,85 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	CapabilitySummary->SetNumberField(TEXT("homePlotMaximum"), 6);
 	Request->SetObjectField(TEXT("capabilitySummary"), CapabilitySummary);
 
+	// The provider is intentionally stateless between stages. Retain the decisions
+	// later stages actually need as an explicit, compact world bible instead of
+	// relying on hidden conversation history or an undifferentiated JSON dump.
+	const TSharedRef<FJsonObject> WorldContext = MakeShared<FJsonObject>();
+	WorldContext->SetStringField(TEXT("runId"), GenerationRunId);
+	WorldContext->SetStringField(TEXT("requestId"), ActiveGenerationRequestId);
+	WorldContext->SetStringField(TEXT("currentStage"), StageName);
+	WorldContext->SetNumberField(TEXT("originalRootSeed"), GenerationSeed);
+	double SelectedLayoutSeed = GenerationSeed;
+	WorkingGenerationDocument->TryGetNumberField(TEXT("seed"), SelectedLayoutSeed);
+	WorldContext->SetNumberField(TEXT("selectedLayoutSeed"), SelectedLayoutSeed);
+	WorldContext->SetStringField(TEXT("selectedCandidateId"), SelectedLayoutCandidateId);
+	WorldContext->SetNumberField(TEXT("repairAttempt"), RepairAttempt);
+	WorldContext->SetNumberField(TEXT("consecutiveIssueSignatureCount"), ConsecutiveRepairIssueCount);
+
+	const auto CopyStringField = [](const TSharedPtr<FJsonObject>& Source,
+		const TSharedRef<FJsonObject>& Target, const TCHAR* Field)
+	{
+		FString Value;
+		if (Source.IsValid() && Source->TryGetStringField(Field, Value))
+		{
+			Target->SetStringField(Field, Value);
+		}
+	};
+	const auto CopyStringArrayField = [](const TSharedPtr<FJsonObject>& Source,
+		const TSharedRef<FJsonObject>& Target, const TCHAR* Field)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (Source.IsValid() && Source->TryGetArrayField(Field, Values) && Values != nullptr)
+		{
+			Target->SetArrayField(Field, *Values);
+		}
+	};
+	const TSharedPtr<FJsonObject>* BriefObject = nullptr;
+	if (WorkingGenerationDocument->TryGetObjectField(TEXT("brief"), BriefObject) &&
+		BriefObject != nullptr && BriefObject->IsValid())
+	{
+		const TSharedRef<FJsonObject> CreativePillars = MakeShared<FJsonObject>();
+		CopyStringField(*BriefObject, CreativePillars, TEXT("theme"));
+		CopyStringField(*BriefObject, CreativePillars, TEXT("settlementIdentity"));
+		CopyStringArrayField(*BriefObject, CreativePillars, TEXT("premises"));
+		CopyStringArrayField(*BriefObject, CreativePillars, TEXT("terrainPreferences"));
+		WorldContext->SetObjectField(TEXT("creativePillars"), CreativePillars);
+	}
+	const TSharedPtr<FJsonObject>* TopologyObject = nullptr;
+	if (WorkingGenerationDocument->TryGetObjectField(TEXT("topology"), TopologyObject) &&
+		TopologyObject != nullptr && TopologyObject->IsValid())
+	{
+		const TSharedRef<FJsonObject> LorePillars = MakeShared<FJsonObject>();
+		for (const TCHAR* Field : {TEXT("governance"), TEXT("historicalWound"), TEXT("currentTension"),
+			TEXT("supernaturalPremise"), TEXT("centralThreat")})
+		{
+			CopyStringField(*TopologyObject, LorePillars, Field);
+		}
+		CopyStringArrayField(*TopologyObject, LorePillars, TEXT("districts"));
+		CopyStringArrayField(*TopologyObject, LorePillars, TEXT("landmarkLocationIds"));
+		WorldContext->SetObjectField(TEXT("lorePillars"), LorePillars);
+	}
+	const TSharedRef<FJsonObject> LockedIds = MakeShared<FJsonObject>();
+	for (const TCHAR* Section : {TEXT("locations"), TEXT("facts"), TEXT("threats")})
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		TArray<TSharedPtr<FJsonValue>> IdValues;
+		if (WorkingGenerationDocument->TryGetArrayField(Section, Values) && Values != nullptr)
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Values)
+			{
+				const TSharedPtr<FJsonObject> Object = Value.IsValid() ? Value->AsObject() : nullptr;
+				FString Id;
+				if (Object.IsValid() && Object->TryGetStringField(TEXT("id"), Id))
+				{
+					IdValues.Add(MakeShared<FJsonValueString>(Id));
+				}
+			}
+		}
+		LockedIds->SetArrayField(Section, IdValues);
+	}
+	WorldContext->SetObjectField(TEXT("lockedIds"), LockedIds);
+
 	TArray<TSharedPtr<FJsonValue>> CandidateValues;
 	for (const FWorldDirectorLayoutCandidate& Candidate : LayoutCandidates)
 	{
@@ -1573,9 +1664,15 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 		CandidateObject->SetNumberField(TEXT("meanSlopeDegrees"), Candidate.MeanSlopeDegrees);
 		CandidateObject->SetNumberField(TEXT("maximumRoadGradePercent"), Candidate.MaximumRoadGrade * 100.0f);
 		CandidateObject->SetStringField(TEXT("physicalFingerprint"), Candidate.WorldFingerprint.Left(16));
+		CandidateObject->SetBoolField(TEXT("selected"), Candidate.OpaqueId == SelectedLayoutCandidateId);
 		CandidateValues.Add(MakeShared<FJsonValueObject>(CandidateObject));
+		if (Candidate.OpaqueId == SelectedLayoutCandidateId)
+		{
+			WorldContext->SetObjectField(TEXT("selectedPhysicalLayout"), CandidateObject);
+		}
 	}
 	Request->SetArrayField(TEXT("layoutCandidates"), CandidateValues);
+	Request->SetObjectField(TEXT("worldContext"), WorldContext);
 
 	TArray<TSharedPtr<FJsonValue>> ValidationValues;
 	for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
@@ -1587,7 +1684,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 		ValidationValues.Add(MakeShared<FJsonValueObject>(IssueObject));
 	}
 	Request->SetArrayField(TEXT("validationIssues"), ValidationValues);
-	Request->SetBoolField(TEXT("replaceRepeatedFailure"), RepairAttempt >= 3);
+	Request->SetBoolField(TEXT("replaceRepeatedFailure"), ConsecutiveRepairIssueCount >= 2);
 	Request->SetBoolField(
 		TEXT("testInvalidPopulationOnce"),
 		GenerationStage == EWorldDirectorGenerationStage::Population &&
@@ -1605,6 +1702,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	}
 	FWorldDirectorGenerationStageMetric& Metric = GenerationMetrics.AddDefaulted_GetRef();
 	Metric.Stage = StageName;
+	Metric.RequestId = ActiveGenerationRequestId;
 	Metric.StartedAtUtc = FDateTime::UtcNow().ToIso8601();
 	Metric.RequestPath = RequestPath;
 	Metric.ResponsePath = ResponsePath;
@@ -1632,22 +1730,37 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 		FPlatformMisc::GetEnvironmentVariable(TEXT("WORLD_DIRECTOR_PYTHON"));
 	const FString CompanionExecutable = ConfiguredPython.IsEmpty()
 		? TEXT("/usr/bin/python3") : ConfiguredPython;
+	const FString ExpectedRunId = GenerationRunId;
+	const FString ExpectedRequestId = ActiveGenerationRequestId;
+	const EWorldDirectorGenerationStage ExpectedStage = GenerationStage;
 	DirectorProvider->RequestStage(
 		CompanionExecutable, CompanionScript, RequestPath, ResponsePath,
 		GenerationStageTimeoutSeconds,
-		[WeakThis](FWorldDirectorProviderResponse&& Response)
+		[WeakThis, ExpectedRunId, ExpectedRequestId, ExpectedStage](FWorldDirectorProviderResponse&& Response)
 		{
 			if (WeakThis.IsValid())
 			{
-				WeakThis->HandleStageResponse(MoveTemp(Response));
+				WeakThis->HandleStageResponse(
+					ExpectedRunId, ExpectedRequestId, ExpectedStage, MoveTemp(Response));
 			}
 		});
 }
 
-void UDirectorBridgeSubsystem::HandleStageResponse(FWorldDirectorProviderResponse&& Response)
+void UDirectorBridgeSubsystem::HandleStageResponse(
+	const FString& ExpectedRunId,
+	const FString& ExpectedRequestId,
+	const EWorldDirectorGenerationStage ExpectedStage,
+	FWorldDirectorProviderResponse&& Response)
 {
-	if (!bGenerationRunning)
+	if (!bGenerationRunning || ExpectedRunId != GenerationRunId ||
+		ExpectedRequestId != ActiveGenerationRequestId || ExpectedStage != GenerationStage)
 	{
+		UE_LOG(LogWorldDirector, Warning,
+			TEXT("WORLD_DIRECTOR_STALE_STAGE_RESPONSE ignoredRun=%s activeRun=%s ignoredRequest=%s activeRequest=%s ignoredStage=%s activeStage=%s"),
+			*ExpectedRunId, *GenerationRunId,
+			*ExpectedRequestId, *ActiveGenerationRequestId,
+			*StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(static_cast<int64>(ExpectedStage)),
+			*StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(static_cast<int64>(GenerationStage)));
 		return;
 	}
 	const auto ApplyDiagnostics = [](
@@ -1948,6 +2061,22 @@ bool UDirectorBridgeSubsystem::IntegrateAndValidate()
 	{
 		IntegrateMetric.DurationSeconds = FPlatformTime::Seconds() - IntegrateStartedAt;
 		IntegrateMetric.Error = TEXT("Validation requested a targeted repair.");
+		TArray<FString> CurrentIssueKeys;
+		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+		{
+			CurrentIssueKeys.Add(Issue.Code.ToString() + TEXT("|") + Issue.Path);
+		}
+		CurrentIssueKeys.Sort();
+		const FString CurrentIssueSignature = FString::Join(CurrentIssueKeys, TEXT(";"));
+		if (!CurrentIssueSignature.IsEmpty() && CurrentIssueSignature == LastRepairIssueSignature)
+		{
+			++ConsecutiveRepairIssueCount;
+		}
+		else
+		{
+			LastRepairIssueSignature = CurrentIssueSignature;
+			ConsecutiveRepairIssueCount = CurrentIssueSignature.IsEmpty() ? 0 : 1;
+		}
 		RecordGenerationLog(FString::Printf(TEXT("Integration found %d validation issue(s); repair attempt %d"),
 			LastGenerationValidation.Issues.Num(), RepairAttempt + 1));
 		GenerationIssueHistory.Append(LastGenerationValidation.Issues);
@@ -1996,11 +2125,11 @@ bool UDirectorBridgeSubsystem::IntegrateAndValidate()
 	if (!FWorldDirectorJson::SaveResolvedWorldPlan(Resolved, RecipeJson, RecipeSerializationReport) ||
 		!FFileHelper::SaveStringToFile(
 			RecipeJson,
-			*FPaths::Combine(GenerationRunDirectory, TEXT("06-resolved-world-v2.json")),
+			*FPaths::Combine(GenerationRunDirectory, TEXT("06-resolved-world-v3.json")),
 			FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
 		IntegrateMetric.DurationSeconds = FPlatformTime::Seconds() - IntegrateStartedAt;
-		IntegrateMetric.Error = TEXT("Could not persist the replayable V2 physical recipe.");
+		IntegrateMetric.Error = TEXT("Could not persist the replayable V3 physical recipe.");
 		FinishGeneration(false, IntegrateMetric.Error);
 		return false;
 	}
@@ -2309,7 +2438,11 @@ void UDirectorBridgeSubsystem::SaveRunSummary() const
 	Summary->SetStringField(TEXT("error"), LastGenerationError);
 	Summary->SetStringField(TEXT("worldFingerprint"), LastResolvedWorldPlan.WorldFingerprint);
 	Summary->SetStringField(TEXT("terrainFingerprint"), LastResolvedWorldPlan.Terrain.HeightFingerprint);
+	Summary->SetStringField(TEXT("surfaceFingerprint"), LastResolvedWorldPlan.Terrain.SurfaceFingerprint);
 	Summary->SetStringField(TEXT("layoutFingerprint"), LastResolvedWorldPlan.LayoutFingerprint);
+	Summary->SetNumberField(TEXT("rootSeed"), GenerationSeed);
+	Summary->SetNumberField(TEXT("selectedLayoutSeed"), LastResolvedWorldPlan.Seed);
+	Summary->SetStringField(TEXT("selectedCandidateId"), SelectedLayoutCandidateId);
 	TArray<TSharedPtr<FJsonValue>> Metrics;
 	int64 TotalInputTokens = 0;
 	int64 TotalCachedInputTokens = 0;
@@ -2323,6 +2456,7 @@ void UDirectorBridgeSubsystem::SaveRunSummary() const
 		TotalReasoningOutputTokens += Metric.ReasoningOutputTokens;
 		const TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("stage"), Metric.Stage);
+		Item->SetStringField(TEXT("requestId"), Metric.RequestId);
 		Item->SetStringField(TEXT("startedAtUtc"), Metric.StartedAtUtc);
 		Item->SetNumberField(TEXT("durationSeconds"), Metric.DurationSeconds);
 		Item->SetNumberField(TEXT("requestBytes"), static_cast<double>(Metric.RequestBytes));

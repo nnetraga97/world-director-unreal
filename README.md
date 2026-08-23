@@ -20,8 +20,9 @@ The model determines meaning—identity, history, population, relationships, bel
 - Player-facing **Create World** flow with model and reasoning-effort selection.
 - Asynchronous local CLI companion with cancellation, per-stage timeouts, and teardown-safe callbacks.
 - Staged interpretation, topology, layout selection, population, integration, repair, and runtime compilation.
-- Seeded V2 physical generation: terrain macroforms, surface classification, districts, constrained plots, curved routes, water, and exclusion-aware dressing.
-- Runtime procedural terrain with collision and textured surface sections.
+- Seeded V3 physical generation across a 1.2 km domain: composable macroforms, thermal erosion, connected water, terrain-aware districts and plots, graded routes, coherent farms, and layered biome dressing.
+- One continuous runtime terrain mesh with smooth normals, collision, and a project-owned four-layer grass/gravel/farm/rock material driven by deterministic vertex-color masks.
+- Seed-specific settlement morphologies, landmark approaches, terrain affinities, and environmental-story clusters that make physical layout reflect the generated world premise.
 - Town population with homes, occupations, schedules, relationships, beliefs, memories, and lightweight dialogue.
 - Deterministic simulation that continues without a connected model.
 - Location-repurposing projects validated and executed by Unreal.
@@ -35,7 +36,8 @@ WorldGen/                                      Unreal project
 WorldGen/Plugins/WorldDirector/                Runtime, editor, and test modules
 WorldGen/Plugins/WorldDirector/Resources/      Schemas, fixtures, and CLI companion
 WorldGen/Content/CapabilityPack/               Game-owned certified wrappers
-WorldGen/Content/WorldDirector/                Maps, StateTree, PCG, and profiles
+WorldGen/Content/WorldDirector/                Maps, material, StateTree, PCG, and profiles
+WorldGen/Scripts/                              Model-free bridge tests and editor asset tooling
 Docs/WorldDirector/                            Architecture and subsystem notes
 initial_plan.md                                Original vertical-slice execution plan
 ```
@@ -79,6 +81,8 @@ The primary test map is:
 | `Tab` | Toggle the interaction cursor |
 | `I` | Open or close World Director inspection |
 
+Within Create World, `Ctrl+Enter` starts generation. In Diagnostics, `Ctrl+Left` and `Ctrl+Right` change the selected stage and `Ctrl+C` copies the visible report.
+
 Click a resident while the interaction cursor is enabled to open dialogue.
 
 ## Safe local verification
@@ -102,11 +106,30 @@ Run the deterministic fixture and transient-world automation suite:
 
 These automation tests use local fixtures and do **not** invoke an AI model. In PIE, enable **Debug fixture (no model)** in Create World for the same model-free player-flow test.
 
+Run the companion prompt/response contract tests without Unreal or a provider:
+
+```sh
+python3 -m unittest discover -s WorldGen/Scripts -p 'test_*.py' -v
+```
+
+The project-owned terrain and civic-paving materials are versioned as
+`/Game/WorldDirector/Materials/M_WorldDirectorTerrainBlend` and
+`/Game/WorldDirector/Materials/M_WorldDirectorPaving`. Their graphs can be
+rebuilt from the already-installed certified textures by running
+`WorldGen/Scripts/build_world_director_terrain_material.py` through
+`UnrealEditor-Cmd`; the script does not download or generate artwork.
+
+For deterministic visual review, add `-WorldDirectorVisualCapture` and one of
+`-WorldDirectorVisualView=overview|approach|landmark|civic|topdown` when launching
+`L_WorldDirectorTown`. Add `-WorldDirectorVisualOutput=/absolute/path.png` to
+choose the screenshot destination. This path always uses the local fixture and
+does not invoke the configured model.
+
 Real model generation is never required for build or fixture verification. Configure and invoke it only deliberately; generated diagnostics are written beneath `WorldGen/Saved/WorldRuns/` and remain local.
 
 ## Architecture documentation
 
-- [World generation V2](Docs/WorldDirector/WorldGenerationV2.md)
+- [World generation foundation](Docs/WorldDirector/WorldGenerationV2.md)
 - [World compiler](Docs/WorldDirector/WorldCompiler.md)
 - [Staged generation](Docs/WorldDirector/StagedGeneration.md)
 - [Player world creation](Docs/WorldDirector/PlayerWorldCreation.md)

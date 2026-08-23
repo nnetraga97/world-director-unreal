@@ -386,7 +386,11 @@ public:
 
 private:
 	void RequestCurrentStage();
-	void HandleStageResponse(FWorldDirectorProviderResponse&& Response);
+	void HandleStageResponse(
+		const FString& ExpectedRunId,
+		const FString& ExpectedRequestId,
+		EWorldDirectorGenerationStage ExpectedStage,
+		FWorldDirectorProviderResponse&& Response);
 	bool ApplyStagePayload(const TSharedPtr<class FJsonObject>& Payload, FString& OutError);
 	bool BuildValidLayoutCandidates(FString& OutError);
 	bool IntegrateAndValidate();
@@ -439,6 +443,12 @@ private:
 	int32 RepairAttempt = 0;
 
 	UPROPERTY()
+	int32 ConsecutiveRepairIssueCount = 0;
+
+	UPROPERTY()
+	FString LastRepairIssueSignature;
+
+	UPROPERTY()
 	FString LastGenerationError;
 
 	UPROPERTY()
@@ -471,6 +481,8 @@ private:
 	int32 CurrentMetricIndex = INDEX_NONE;
 
 	FString SelectedLayoutCandidateId;
+	FString ActiveGenerationRequestId;
+	uint64 GenerationRequestSerial = 0;
 	TSharedPtr<class FJsonObject> WorkingGenerationDocument;
 	TSharedPtr<IWorldDirectorProvider> DirectorProvider;
 	FDelegateHandle WorldCleanupHandle;

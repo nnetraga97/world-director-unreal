@@ -18,10 +18,10 @@ must never contain `/Game/` or `/Engine/` asset paths.
 
 `FResolvedWorldPlan` is Unreal-facing. It maps semantic location IDs to exact
 terrain, shell, interior, modular character-part, and animation soft paths;
-building/entrance transforms and footprints; repurposable flags; route
-segments; resident spawn transforms; and basic schedule intents. Phase 3 owns
-that resolution step and independently verifies every resolved asset before
-runtime spawn.
+building/entrance transforms and footprints; semantic purpose and scarce-civic-
+court flags; repurposable flags; corridor-first route segments; resident spawn
+transforms; and basic schedule intents. Phase 3 owns that resolution step and
+independently verifies every resolved asset before runtime spawn.
 
 Names are presentation only. Every cross-reference uses a stable string ID.
 
@@ -34,8 +34,10 @@ enters `FResolvedWorldPlan`; no candidate exposes Unreal paths to the model.
 
 ## Versioning and schemas
 
-Every plan-named structure carries `version: 1`. The canonical Draft 2020-12
-schema and per-type entry schemas are in
+Semantic plan structures carry `version: 1`; the replayable
+`FResolvedWorldPlan` is currently terrain-rich physical recipe version 3 and
+still accepts legacy version 2 saves. The canonical Draft 2020-12 schema and
+per-type entry schemas are in
 `WorldGen/Plugins/WorldDirector/Resources/Schemas`. Reflected Unreal booleans
 retain their UE wire names (`bEmployed`, `bRepurposable`, and so on), which is
 also what strict `FJsonObjectConverter` deserialization requires.

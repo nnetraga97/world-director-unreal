@@ -36,6 +36,138 @@ STAGE_KEYS = {
     "repair": ("replacements",),
 }
 
+STAGE_DEFINITIONS = {
+    "interpret": {"brief": ("object", "WorldBrief")},
+    "topology": {
+        "topology": ("object", "TownTopology"),
+        "locations": ("array", "WorldLocation"),
+        "facts": ("array", "WorldFact"),
+        "threats": ("array", "Threat"),
+    },
+    "layout": {"selectedCandidateId": ("string", None)},
+    "population": {
+        "residents": ("array", "Resident"),
+        "households": ("array", "Household"),
+        "relationships": ("array", "Relationship"),
+        "beliefs": ("array", "Belief"),
+        "events": ("array", "WorldEvent"),
+        "changeProjects": ("array", "ChangeProject"),
+    },
+    "repair": {"replacements": ("array", None)},
+}
+
+
+def strict_json_loads(text: str) -> dict:
+    """Parse provider JSON without duplicate keys or non-standard numbers."""
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-standard JSON number: {value}")
+
+    value = json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(value, dict):
+        raise ValueError("provider output must contain one JSON object")
+    return value
+
+
+def _referenced_definitions(value: object) -> set[str]:
+    names: set[str] = set()
+    if isinstance(value, dict):
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            names.add(reference.rsplit("/", 1)[-1])
+        for child in value.values():
+            names.update(_referenced_definitions(child))
+    elif isinstance(value, list):
+        for child in value:
+            names.update(_referenced_definitions(child))
+    return names
+
+
+def stage_response_schema(request: dict) -> dict:
+    """Build a neutral, stage-specific schema without fixture names or content."""
+    stage = request["stage"]
+    schema_path = Path(__file__).resolve().parents[1] / "Schemas" / "world-director.schema.json"
+    canonical_defs = load_json(schema_path)["$defs"]
+    payload_properties = {}
+    initial_defs: set[str] = set()
+    for field, (wire_type, definition) in STAGE_DEFINITIONS[stage].items():
+        if definition:
+            initial_defs.add(definition)
+            field_schema = {"$ref": f"#/$defs/{definition}"}
+            if wire_type == "array":
+                field_schema = {"type": "array", "items": field_schema}
+        elif stage == "layout":
+            candidate_ids = [
+                item.get("opaqueId")
+                for item in request.get("layoutCandidates", [])
+                if isinstance(item, dict) and isinstance(item.get("opaqueId"), str)
+            ]
+            field_schema = {"type": "string", "enum": candidate_ids}
+        elif stage == "repair":
+            field_schema = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["section", "value"],
+                    "properties": {
+                        "section": {"type": "string"},
+                        "index": {"type": "integer", "minimum": 0},
+                        "value": {},
+                    },
+                },
+            }
+        else:
+            field_schema = {"type": wire_type}
+        payload_properties[field] = field_schema
+
+    required_defs = set(initial_defs)
+    pending = list(initial_defs)
+    while pending:
+        name = pending.pop()
+        definition = canonical_defs.get(name)
+        if not isinstance(definition, dict):
+            raise ValueError(f"canonical schema is missing definition '{name}'")
+        for dependency in _referenced_definitions(definition):
+            if dependency not in required_defs:
+                required_defs.add(dependency)
+                pending.append(dependency)
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["stage", "payload"],
+        "properties": {
+            "stage": {"const": stage},
+            "payload": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(STAGE_KEYS[stage]),
+                "properties": payload_properties,
+            },
+        },
+        "$defs": {name: canonical_defs[name] for name in sorted(required_defs)},
+    }
+
+
+def response_envelope_example(stage: str) -> dict:
+    payload = {}
+    for field, (wire_type, _) in STAGE_DEFINITIONS[stage].items():
+        payload[field] = [] if wire_type == "array" else {} if wire_type == "object" else "string"
+    return {"stage": stage, "payload": payload}
+
 
 def load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
@@ -118,11 +250,9 @@ def build_agent_prompt(request: dict) -> str:
     current = request.get("current", {})
     candidates = request.get("layoutCandidates", [])
     validation = request.get("validationIssues", [])
-    exemplar_request = dict(request)
-    exemplar_request["providerMode"] = "fixture"
-    exemplar_request["testInvalidPopulationOnce"] = False
-    exemplar = fixture_response(exemplar_request)
-    required = ", ".join(STAGE_KEYS[stage])
+    world_context = request.get("worldContext", {})
+    response_schema = stage_response_schema(request)
+    envelope_example = response_envelope_example(stage)
     blank_rule = (
         "The player prompt is blank. Invent an original, confident world; do not ask questions."
         if not str(request.get("playerPrompt", "")).strip()
@@ -145,8 +275,12 @@ You are the World Director semantic generator. Complete only stage '{stage}'.
 {blank_rule}
 {repair_rule}
 Never emit Unreal asset paths, transforms, coordinates, commentary, markdown, or questions.
-Return exactly one JSON object with this shape:
-{{"stage":"{stage}","payload":{{{required}}}}}
+Return exactly one strict JSON object. Do not add keys outside this response schema and do not
+emit duplicate keys, NaN, or Infinity. The following is only an outer-envelope example; populate
+every nested field required by the schema:
+{json.dumps(envelope_example, separators=(',', ':'), sort_keys=True)}
+Stage-specific JSON Schema:
+{json.dumps(response_schema, separators=(',', ':'), sort_keys=True)}
 Use lower-camel-case wire names matching the supplied current document. Preserve every supplied
 stable ID unless this is a targeted repair. The final town must use 20-30 residents, 12-18
 locations/buildings, a connected network of reciprocal relationships, coherent households, at
@@ -158,18 +292,18 @@ authority holder among required participants when the initiator does not own or 
 target. Use Condition.ThreatActive, Condition.Overnight, and Condition.PlayerAway, schedule it
 at or after minute 1200, and require 60-1440 transition minutes.
 
-Player prompt: {request.get('playerPrompt', '')!r}
-Seed: {request.get('seed', 0)}
+Authoritative player prompt: {request.get('playerPrompt', '')!r}
+Original root seed: {request.get('seed', 0)}
+Retained world context (locked decisions and selected physical layout):
+{json.dumps(world_context, separators=(',', ':'), sort_keys=True)}
 Capability summary:
-{json.dumps(capability_summary, indent=2, sort_keys=True)}
+{json.dumps(capability_summary, separators=(',', ':'), sort_keys=True)}
 Accepted stages so far:
-{json.dumps(current, indent=2, sort_keys=True)}
+{json.dumps(current, separators=(',', ':'), sort_keys=True)}
 Opaque Unreal layout candidates:
-{json.dumps(candidates, indent=2, sort_keys=True)}
+{json.dumps(candidates, separators=(',', ':'), sort_keys=True)}
 Targeted validation issues:
-{json.dumps(validation, indent=2, sort_keys=True)}
-Canonical shape exemplar (copy its exact fields and value types, but create content that fits the accepted stages):
-{json.dumps(exemplar, indent=2, sort_keys=True)}
+{json.dumps(validation, separators=(',', ':'), sort_keys=True)}
 """.strip()
 
 
@@ -241,12 +375,17 @@ def parse_provider_events(events_text: str) -> dict:
         "cachedInputTokens": 0,
         "outputTokens": 0,
         "reasoningOutputTokens": 0,
+        "eventCount": 0,
+        "malformedEventCount": 0,
+        "usageAvailable": False,
     }
     for line in events_text.splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            telemetry["malformedEventCount"] += 1
             continue
+        telemetry["eventCount"] += 1
         if event.get("type") == "thread.started":
             telemetry["threadId"] = str(event.get("thread_id", ""))
         if event.get("type") != "turn.completed":
@@ -254,6 +393,7 @@ def parse_provider_events(events_text: str) -> dict:
         usage = event.get("usage", {})
         if not isinstance(usage, dict):
             continue
+        telemetry["usageAvailable"] = True
         for wire_name in (
             "input_tokens",
             "cached_input_tokens",
@@ -264,8 +404,53 @@ def parse_provider_events(events_text: str) -> dict:
                 [wire_name.split("_")[0]]
                 + [part.title() for part in wire_name.split("_")[1:]]
             )
-            telemetry[camel_name] += int(usage.get(wire_name, 0) or 0)
+            try:
+                telemetry[camel_name] += int(usage.get(wire_name, 0) or 0)
+            except (TypeError, ValueError):
+                telemetry["usageAvailable"] = False
     return telemetry
+
+
+def validate_stage_response(request: dict, response: dict) -> dict:
+    if set(response) != {"stage", "payload"} or response.get("stage") != request["stage"]:
+        raise ValueError("agent response has the wrong or non-canonical stage envelope")
+    payload = response.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("agent response payload must be an object")
+    expected = set(STAGE_KEYS[request["stage"]])
+    if set(payload) != expected:
+        missing = sorted(expected - set(payload))
+        extra = sorted(set(payload) - expected)
+        raise ValueError(f"agent response payload keys differ; missing={missing} extra={extra}")
+    for key, (wire_type, _) in STAGE_DEFINITIONS[request["stage"]].items():
+        value = payload[key]
+        if wire_type == "array" and not isinstance(value, list):
+            raise ValueError(f"agent response payload '{key}' must be an array")
+        if wire_type == "object" and not isinstance(value, dict):
+            raise ValueError(f"agent response payload '{key}' must be an object")
+        if wire_type == "string" and not isinstance(value, str):
+            raise ValueError(f"agent response payload '{key}' must be a string")
+    if request["stage"] == "layout":
+        candidate_ids = {
+            item.get("opaqueId")
+            for item in request.get("layoutCandidates", [])
+            if isinstance(item, dict)
+        }
+        if payload["selectedCandidateId"] not in candidate_ids:
+            raise ValueError("layout response selected an unknown candidate")
+    if request["stage"] == "repair":
+        for index, replacement in enumerate(payload["replacements"]):
+            if not isinstance(replacement, dict) or not {"section", "value"}.issubset(replacement):
+                raise ValueError(f"repair replacement {index} is not canonical")
+            if set(replacement) - {"section", "index", "value"}:
+                raise ValueError(f"repair replacement {index} has unknown keys")
+            if not isinstance(replacement["section"], str):
+                raise ValueError(f"repair replacement {index} section must be a string")
+            if "index" in replacement and (
+                not isinstance(replacement["index"], int) or replacement["index"] < 0
+            ):
+                raise ValueError(f"repair replacement {index} index must be nonnegative")
+    return response
 
 
 def cli_response(request: dict, output_path: Path) -> dict:
@@ -322,7 +507,9 @@ def cli_response(request: dict, output_path: Path) -> dict:
     raw_response_path = artifact_path(output_path, "raw-response.txt")
     events_path = artifact_path(output_path, "provider-events.jsonl")
     telemetry_path = artifact_path(output_path, "telemetry.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt + "\n", encoding="utf-8")
+    provider_started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="world-director-") as temp_dir:
         agent_output = Path(temp_dir) / "agent-response.json"
         expanded = [arg.replace("{output}", str(agent_output)) for arg in command]
@@ -344,15 +531,22 @@ def cli_response(request: dict, output_path: Path) -> dict:
         telemetry = parse_provider_events(provider_events)
         telemetry.update(
             {
+                "runId": str(request.get("runId", "")),
+                "stage": str(request.get("stage", "")),
+                "attempt": int(request.get("attempt", 0) or 0),
                 "requestedModel": requested_model or "CLI default (not reported)",
                 "reasoningEffort": reasoning_effort or "CLI default",
                 "promptCharacters": len(prompt),
+                "responseCharacters": len(raw_response),
+                "providerDurationSeconds": time.perf_counter() - provider_started,
                 "promptPath": str(prompt_path),
                 "rawResponsePath": str(raw_response_path),
                 "providerEventsPath": str(events_path),
                 "telemetryPath": str(telemetry_path),
                 "exitCode": completed.returncode,
                 "providerStderr": (completed.stderr or "")[-8000:],
+                "parseSuccess": False,
+                "schemaSuccess": False,
                 "billedCostUsd": None,
                 "costNote": (
                     "Unavailable: the Codex CLI reports tokens but does not emit a "
@@ -360,26 +554,38 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 ),
             }
         )
-        telemetry_path.write_text(
-            json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
-        )
         if completed.returncode != 0:
+            telemetry["companionOutcome"] = "provider_error"
+            telemetry_path.write_text(
+                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
+            )
             raise RuntimeError(
                 f"configured CLI agent exited {completed.returncode}: "
                 f"{completed.stderr[-2000:]}"
             )
         if not raw_response:
+            telemetry["companionOutcome"] = "missing_response"
+            telemetry_path.write_text(
+                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
+            )
             raise RuntimeError("configured CLI agent produced no last-message file")
-        response = json.loads(strip_code_fence(raw_response))
+        try:
+            response = strict_json_loads(strip_code_fence(raw_response))
+            telemetry["parseSuccess"] = True
+            validate_stage_response(request, response)
+            telemetry["schemaSuccess"] = True
+            telemetry["companionOutcome"] = "success"
+        except Exception as exc:
+            telemetry["companionOutcome"] = "response_validation_error"
+            telemetry["responseValidationError"] = str(exc)
+            telemetry_path.write_text(
+                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
+            )
+            raise
+        telemetry_path.write_text(
+            json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
+        )
 
-    if not isinstance(response, dict) or response.get("stage") != request["stage"]:
-        raise ValueError("agent response has the wrong stage envelope")
-    payload = response.get("payload")
-    if not isinstance(payload, dict):
-        raise ValueError("agent response payload must be an object")
-    for key in STAGE_KEYS[request["stage"]]:
-        if key not in payload:
-            raise ValueError(f"agent response payload is missing '{key}'")
     response["diagnostics"] = telemetry
     return response
 
@@ -398,12 +604,12 @@ def main() -> int:
     if stage not in STAGE_KEYS:
         raise ValueError(f"unsupported or missing stage: {stage}")
 
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     response = (
         fixture_response(request)
         if request.get("providerMode") == "fixture"
         else cli_response(request, args.output)
     )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
     temp_output = args.output.with_suffix(args.output.suffix + ".tmp")
     temp_output.write_text(json.dumps(response, indent=2) + "\n", encoding="utf-8")
     temp_output.replace(args.output)

@@ -1,4 +1,4 @@
-# World Generation V2
+# World Generation V3
 
 World generation now treats terrain, settlement placement, routes, surfaces,
 and biome dressing as replayable physical output. Narrative changes alone do
@@ -12,9 +12,9 @@ AI semantic brief
   -> terrain macroform and semantic surface field
   -> district anchors
   -> terrain-aware constrained plots
-  -> connected curved road hierarchy
+  -> corridor-first curved road hierarchy and sparse civic courts
   -> exclusion-aware biome dressing
-  -> V2 resolved physical recipe
+  -> V3 resolved physical recipe
   -> runtime procedural mesh, collision, assets, and navigation
 ```
 
@@ -40,7 +40,7 @@ classes, dressing recipe, and reachability gates are inside it.
 Each successful AI run stores:
 
 - `05-integrated-world.json`: accepted semantic V1 world state;
-- `06-resolved-world-v2.json`: replayable physical recipe;
+- `06-resolved-world-v3.json`: replayable physical recipe;
 - `world-generation-lab.json`: candidate comparison and physical metrics;
 - `run-summary.json`: AI telemetry plus physical fingerprints.
 
@@ -66,11 +66,14 @@ fingerprints, selected candidate, and retained AI request/response telemetry.
 ## Runtime terrain substrate
 
 The selected substrate is `UProceduralMeshComponent`, enabled explicitly by the
-project and WorldDirector plugin. It produces a 65x65 quantized heightfield with
-separate textured surface sections, synchronous collision cooking, a gravel
-route ribbon mesh, optional water ribbon, and deterministic instanced dressing.
-The authored Landscape is hidden and collision-disabled only while a generated
-town is active, then restored during teardown.
+project and WorldDirector plugin. It produces a 193x193 quantized heightfield
+with a project-owned four-layer terrain material, synchronous collision cooking,
+feathered gravel routes, explicit shared-network junctions, scarce semantic
+paving courts, optional water, a non-colliding horizon continuation, and
+deterministic instanced dressing. New lanes terminate on the existing physical
+network rather than redrawing full corridors, while the primary landmark keeps
+one protected approach. The authored Landscape is hidden and collision-disabled
+only while a generated town is active, then restored during teardown.
 
 Cooked-build collision, trace accuracy, and dynamic-navigation evidence remain
 hard release gates. If Procedural Mesh cannot pass them, the recipe interface is

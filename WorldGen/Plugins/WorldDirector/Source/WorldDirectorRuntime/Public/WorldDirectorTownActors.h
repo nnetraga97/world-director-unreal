@@ -9,6 +9,7 @@
 #include "WorldDirectorTownActors.generated.h"
 
 class UInstancedStaticMeshComponent;
+class UHierarchicalInstancedStaticMeshComponent;
 class UStaticMesh;
 class UStaticMeshComponent;
 
@@ -206,8 +207,22 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Generation")
 	TObjectPtr<class UProceduralMeshComponent> TerrainMesh;
 
+	// A non-colliding continuation beyond the playable terrain. This prevents
+	// normal cameras from exposing the square edge of the generated world while
+	// keeping navigation and physics bounded to the authored V3 terrain recipe.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Generation")
+	TObjectPtr<class UProceduralMeshComponent> HorizonTerrainMesh;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Generation")
 	TObjectPtr<class UProceduralMeshComponent> RouteMesh;
+
+	/** Non-colliding public-space paving, kept separate from gravel route rendering. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Generation")
+	TObjectPtr<class UProceduralMeshComponent> PavingMesh;
+
+	/** Terrain-conforming, parcel-local farm surfaces with authored boundaries and furrow direction. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Generation")
+	TObjectPtr<class UProceduralMeshComponent> FarmMesh;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Generation")
 	TObjectPtr<class UProceduralMeshComponent> WaterMesh;
@@ -232,7 +247,7 @@ private:
 	TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>> WorldDirectorInstanceComponents;
 
 	UPROPERTY(Transient)
-	TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>> DressingInstanceComponents;
+	TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> DressingInstanceComponents;
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<class ALandscapeProxy>> HiddenAuthoredLandscapes;
@@ -265,6 +280,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "World Director|Fixture")
 	void RunAutomatedVisualCapture();
+
+	UFUNCTION()
+	void CaptureAutomatedVisualFrame();
 
 	UFUNCTION()
 	void FinishAutomatedVisualCapture();
@@ -351,10 +369,14 @@ private:
 	bool bPlayerFlowAutoTest = false;
 	bool bPlayerFlowShouldRegenerate = false;
 	int32 PlayerFlowGenerationCount = 0;
+	int32 PlayerFlowNavigationRetryCount = 0;
 	TWeakObjectPtr<AWorldDirectorTownActor> FirstPlayerFlowTown;
 	TWeakObjectPtr<AWorldDirectorLocationActor> ProjectCheckTarget;
 	TWeakObjectPtr<AActor> ProjectCheckOriginalInterior;
 	TWeakObjectPtr<AWorldDirectorLocationActor> ProjectCheckFailedTarget;
+	TWeakObjectPtr<class ACameraActor> AutomatedVisualCaptureCamera;
+	FString AutomatedVisualCapturePath;
+	FString AutomatedVisualCaptureView;
 	FString ProjectCheckProjectId;
 	int32 ProjectCheckInitialMemoryCount = 0;
 	int32 ProjectCheckInitialBeliefCount = 0;

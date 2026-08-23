@@ -522,6 +522,14 @@ struct WORLDDIRECTORRUNTIME_API FResolvedLocationPlan
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FString LocationId;
 
+	/** Semantic purpose copied from the world specification for surface and prop composition. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FName PurposeTag;
+
+	/** True when this place is one of the settlement's deliberately scarce stone civic courts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bPavedCourtyard = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FSoftObjectPath ShellAsset;
 
@@ -632,6 +640,34 @@ struct WORLDDIRECTORRUNTIME_API FWorldDirectorDistrictAnchor
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float InfluenceRadiusCentimeters = 3500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FName TerrainAffinity = TEXT("Terrain.Buildable");
+};
+
+USTRUCT(BlueprintType)
+struct WORLDDIRECTORRUNTIME_API FWorldDirectorFarmParcel
+{
+	GENERATED_BODY()
+
+	/** Stable seed-derived identity used by diagnostics and deterministic replay. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString ParcelId;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FVector2D Center = FVector2D::ZeroVector;
+
+	/** Convex, clockwise world-space boundary. Fields are intentionally not rectangles. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TArray<FVector2D> BoundaryPoints;
+
+	/** Local furrow direction and texture basis. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float YawDegrees = 0.0f;
+
+	/** Deliberate route-facing break in the field boundary. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FVector2D GatePosition = FVector2D::ZeroVector;
 };
 
 USTRUCT(BlueprintType)
@@ -643,16 +679,28 @@ struct WORLDDIRECTORRUNTIME_API FWorldDirectorTerrainRecipe
 	EWorldDirectorTerrainArchetype Archetype = EWorldDirectorTerrainArchetype::Basin;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	int32 Resolution = 65;
+	int32 Resolution = 193;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	int32 ExtentCentimeters = 14000;
+	int32 ExtentCentimeters = 60000;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TArray<int32> HeightsCentimeters;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TArray<uint8> SurfaceTypes;
+
+	/** Four quantized weights per terrain sample: grass, gravel, farm, rock. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TArray<uint8> SurfaceBlendWeights;
+
+	/** Quantized terrain moisture used by biome placement and material breakup. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TArray<uint8> MoistureValues;
+
+	/** Authored-feeling cultivated plots rendered independently from the coarse terrain mask. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TArray<FWorldDirectorFarmParcel> FarmParcels;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TArray<FVector> WaterControlPoints;
@@ -668,6 +716,21 @@ struct WORLDDIRECTORRUNTIME_API FWorldDirectorTerrainRecipe
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float MeanSlopeDegrees = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float BuildableRatio = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float WaterCoverage = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float RockCoverage = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FName SettlementMorphology = TEXT("Morphology.ClusteredBasin");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString EnvironmentalStory;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FString HeightFingerprint;
@@ -697,7 +760,7 @@ struct WORLDDIRECTORRUNTIME_API FResolvedWorldPlan
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	int32 Version = 2;
+	int32 Version = 3;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FString Id;
@@ -712,10 +775,10 @@ struct WORLDDIRECTORRUNTIME_API FResolvedWorldPlan
 	FSoftObjectPath TerrainMap;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FString GeneratorVersion = TEXT("worldgen-physical-v2");
+	FString GeneratorVersion = TEXT("worldgen-physical-v4");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
-	FString ContentVersion = TEXT("stylized-village-1");
+	FString ContentVersion = TEXT("stylized-village-4");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FName EnvironmentProfile = TEXT("Profile.StylizedVillage");

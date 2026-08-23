@@ -103,19 +103,18 @@ declared footprint or entrance clearance does not fit.
 
 The Phase 1 audit established that all eight wrappers load, render, expose door
 components, and have collision-backed geometry. Phase 3 added a stricter test:
-dynamic navigation must produce a short complete path across both sides of the
-actual spawned vendor-door transform. Under that test, only
-`BP_Cap_Home_Compact_01`, `BP_Cap_Home_Multiwing_01`, and
-`BP_Cap_Workplace_Longhouse_01` currently qualify for procedural selection.
+dynamic navigation must produce a short complete path at the generated exterior
+entrance apron. `BP_Cap_Home_Compact_01`, `BP_Cap_Home_Multiwing_01`, and
+`BP_Cap_Workplace_Longhouse_01` qualify directly. The inn and guildhall also
+qualify when their navigation/activity staging point is moved beyond their
+collision-backed porch trim while the visible door remains at the authored
+threshold; the deterministic player-flow smoke verifies every generated
+entrance after each regeneration.
 
-`BP_Cap_Home_Compact_02`, `BP_Cap_Home_Tall_02`,
-`BP_Cap_Workplace_Inn_01`, and `BP_Cap_Workplace_Guildhall_01` produced
-disconnected door-side nav islands in the compiled fixture. They remain valid
-installed art but are excluded from compiler selection pending collision or
-entrance remediation. The other visually audited wrapper is likewise not
-promoted until it passes the same runtime gate. This qualification supersedes
-the broader Phase 1 assumption that a visible door component alone proved
-runtime enterability.
+`BP_Cap_Home_Compact_02`, `BP_Cap_Home_Tall_02`, and the other visually audited
+wrapper remain excluded because they have not passed that same runtime gate.
+This qualification supersedes the broader Phase 1 assumption that a visible
+door component alone proved runtime enterability.
 
 ## Furniture, household capacity, and collision
 
