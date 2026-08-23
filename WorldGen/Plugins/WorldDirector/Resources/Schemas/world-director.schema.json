@@ -104,8 +104,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "version", "id", "displayName", "homeLocationId", "workplaceLocationId",
-        "householdId", "occupationTag", "bEmployed", "beliefIds", "relationshipIds"
+        "version", "id", "displayName", "homeLocationId", "workplaceLocationId", "householdId",
+        "occupationTag", "bEmployed", "currentLocationId", "motivation", "fear", "importantMemories",
+        "availability", "beliefIds", "relationshipIds"
       ],
       "properties": {
         "version": { "$ref": "#/$defs/Version" },
@@ -140,8 +141,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "version", "id", "sourceResidentId", "targetResidentId",
-        "relationshipType", "bBidirectional", "reciprocalRelationshipId"
+        "version", "id", "sourceResidentId", "targetResidentId", "relationshipType", "bBidirectional",
+        "reciprocalRelationshipId", "trust", "affinity", "fear", "obligation"
       ],
       "properties": {
         "version": { "$ref": "#/$defs/Version" },
@@ -160,7 +161,10 @@
     "Belief": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "id", "holderResidentId", "factId", "confidence", "bImportantSecret"],
+      "required": [
+        "version", "id", "holderResidentId", "factId", "confidence", "bImportantSecret",
+        "sourceResidentId", "secrecy", "emotionalSignificance", "willingnessToShare"
+      ],
       "properties": {
         "version": { "$ref": "#/$defs/Version" },
         "id": { "$ref": "#/$defs/StableId" },

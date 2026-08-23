@@ -2227,10 +2227,29 @@ bool UDirectorBridgeSubsystem::ApplyTargetedRepairs(
 		OutError = TEXT("Repair stage did not return targeted replacements.");
 		return false;
 	}
+	// A whole-document parse or shape failure reports path "$", which resolves to the
+	// section "$" -- a name no replacement can ever legally target. The repair round
+	// trip was therefore guaranteed to be rejected ("Repair attempted to modify a
+	// section not named by validation") no matter how good the model's answer was.
+	// When the failure is document-wide, every top-level section is fair game.
 	TSet<FString> AllowedSections;
+	bool bDocumentWideFailure = false;
 	for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
 	{
-		AllowedSections.Add(ValidationSection(Issue.Path));
+		const FString Section = ValidationSection(Issue.Path);
+		if (Section.IsEmpty() || Section == TEXT("$"))
+		{
+			bDocumentWideFailure = true;
+			continue;
+		}
+		AllowedSections.Add(Section);
+	}
+	if (bDocumentWideFailure && WorkingGenerationDocument.IsValid())
+	{
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : WorkingGenerationDocument->Values)
+		{
+			AllowedSections.Add(Field.Key);
+		}
 	}
 	for (const TSharedPtr<FJsonValue>& ReplacementValue : *Replacements)
 	{

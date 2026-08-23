@@ -32,6 +32,19 @@ bool LoadFixture(const TCHAR* Filename, FString& OutJson)
 		*(FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Fixtures"), Filename)));
 }
 
+bool LoadSchema(FString& OutJson)
+{
+	const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("WorldDirector"));
+	if (!Plugin.IsValid())
+	{
+		return false;
+	}
+	return FFileHelper::LoadFileToString(
+		OutJson,
+		*(FPaths::Combine(
+			Plugin->GetBaseDir(), TEXT("Resources/Schemas"), TEXT("world-director.schema.json"))));
+}
+
 TSet<FName> MakeFixtureCapabilityTags()
 {
 	return {
@@ -1187,6 +1200,129 @@ bool FWorldDirectorCompilerResolveFixtureTest::RunTest(const FString& Parameters
 	}
 	TestTrue(TEXT("Alternate seed materially changes physical plot placement"),
 		MovedLocationCount >= FirstPlan.Locations.Num() / 2);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FWorldDirectorSchemaMatchesStrictImportTest,
+	"WorldDirector.Contract.SchemaMatchesStrictImport",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWorldDirectorSchemaMatchesStrictImportTest::RunTest(const FString& Parameters)
+{
+	// The spec is imported with FJsonObjectConverter strict mode, which requires EVERY
+	// UPROPERTY to be present. The schema handed to the model is therefore only honest
+	// if each $def lists every struct field in both "properties" and "required".
+	// When these drifted, the model omitted a field the schema called optional
+	// (Resident.currentLocationId) and the whole run failed at integration with
+	// "Missing JSON value named CurrentLocationId" -- unrecoverably, because a parse
+	// failure reports path "$" and no targeted repair can address it.
+	FString SchemaJson;
+	if (!TestTrue(TEXT("world-director.schema.json loads"), LoadSchema(SchemaJson)))
+	{
+		return false;
+	}
+	TSharedPtr<FJsonObject> Root;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(SchemaJson);
+	if (!TestTrue(TEXT("schema parses"), FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid()))
+	{
+		return false;
+	}
+	const TSharedPtr<FJsonObject>* Defs = nullptr;
+	if (!TestTrue(TEXT("schema exposes $defs"), Root->TryGetObjectField(TEXT("$defs"), Defs)))
+	{
+		return false;
+	}
+
+	struct FSchemaBinding
+	{
+		const TCHAR* DefName;
+		UScriptStruct* Struct;
+	};
+	const FSchemaBinding Bindings[] = {
+		{TEXT("WorldBrief"), FWorldBrief::StaticStruct()},
+		{TEXT("TownTopology"), FTownTopology::StaticStruct()},
+		{TEXT("TownTopologyEdge"), FTownTopologyEdge::StaticStruct()},
+		{TEXT("WorldLocation"), FWorldLocation::StaticStruct()},
+		{TEXT("Resident"), FResident::StaticStruct()},
+		{TEXT("ResidentMemory"), FResidentMemory::StaticStruct()},
+		{TEXT("Household"), FHousehold::StaticStruct()},
+		{TEXT("Relationship"), FRelationship::StaticStruct()},
+		{TEXT("Belief"), FBelief::StaticStruct()},
+		{TEXT("WorldFact"), FWorldFact::StaticStruct()},
+		{TEXT("WorldEvent"), FWorldEvent::StaticStruct()},
+		{TEXT("Threat"), FThreat::StaticStruct()},
+		{TEXT("ChangeProject"), FChangeProject::StaticStruct()},
+		{TEXT("GeneratedWorldSpec"), FGeneratedWorldSpec::StaticStruct()}
+	};
+
+	for (const FSchemaBinding& Binding : Bindings)
+	{
+		if (Binding.Struct == nullptr)
+		{
+			AddError(FString::Printf(TEXT("%s has no reflected struct"), Binding.DefName));
+			continue;
+		}
+		const TSharedPtr<FJsonObject>* Def = nullptr;
+		if (!(*Defs)->TryGetObjectField(Binding.DefName, Def))
+		{
+			AddError(FString::Printf(TEXT("schema is missing $defs/%s"), Binding.DefName));
+			continue;
+		}
+
+		TSet<FString> StructFields;
+		for (TFieldIterator<FProperty> PropIt(Binding.Struct); PropIt; ++PropIt)
+		{
+			StructFields.Add(Binding.Struct->GetAuthoredNameForField(*PropIt));
+		}
+
+		TSet<FString> SchemaProperties;
+		const TSharedPtr<FJsonObject>* Properties = nullptr;
+		if ((*Def)->TryGetObjectField(TEXT("properties"), Properties))
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*Properties)->Values)
+			{
+				SchemaProperties.Add(Pair.Key);
+			}
+		}
+
+		TSet<FString> SchemaRequired;
+		const TArray<TSharedPtr<FJsonValue>>* Required = nullptr;
+		if ((*Def)->TryGetArrayField(TEXT("required"), Required))
+		{
+			for (const TSharedPtr<FJsonValue>& Value : *Required)
+			{
+				SchemaRequired.Add(Value->AsString());
+			}
+		}
+
+		for (const FString& Field : StructFields)
+		{
+			if (!SchemaProperties.Contains(Field))
+			{
+				AddError(FString::Printf(
+					TEXT("%s.%s exists on the struct but the schema never describes it, so the model cannot emit it."),
+					Binding.DefName, *Field));
+			}
+			else if (!SchemaRequired.Contains(Field))
+			{
+				AddError(FString::Printf(
+					TEXT("%s.%s is mandatory under strict import but the schema lists it as optional; ")
+					TEXT("a response that omits it fails the whole run."),
+					Binding.DefName, *Field));
+			}
+		}
+		for (const FString& Property : SchemaProperties)
+		{
+			if (!StructFields.Contains(Property))
+			{
+				AddError(FString::Printf(
+					TEXT("schema $defs/%s declares '%s', which no longer exists on the struct; ")
+					TEXT("a response that includes it is rejected as an unknown field."),
+					Binding.DefName, *Property));
+			}
+		}
+	}
 	return !HasAnyErrors();
 }
 
