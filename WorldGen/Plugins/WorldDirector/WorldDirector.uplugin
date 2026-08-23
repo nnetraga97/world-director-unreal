@@ -1,0 +1,35 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "World Director",
+  "Description": "Canonical data, validation, simulation, and director bridge for the generated-town vertical slice.",
+  "Category": "Gameplay",
+  "CreatedBy": "WorldGen",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Plugins": [
+    { "Name": "SmartObjects", "Enabled": true },
+    { "Name": "StateTree", "Enabled": true },
+    { "Name": "GameplayStateTree", "Enabled": true }
+	,{ "Name": "ProceduralMeshComponent", "Enabled": true }
+	,{ "Name": "PlatformCrypto", "Enabled": true }
+  ],
+  "Modules": [
+    {
+      "Name": "WorldDirectorRuntime",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    },
+    {
+      "Name": "WorldDirectorEditor",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    },
+    {
+      "Name": "WorldDirectorTests",
+      "Type": "DeveloperTool",
+      "LoadingPhase": "PostEngineInit"
+    }
+  ]
+}

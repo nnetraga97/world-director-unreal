@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "id": "world.invalid",
+  "seed": 7,
+  "brief": {
+    "version": 1,
+    "id": "brief.invalid",
+    "theme": "Uses /Game/Forbidden/House.House_C directly",
+    "settlementIdentity": "Invalid test settlement",
+    "playerPrompt": "",
+    "premises": [],
+    "terrainPreferences": ["Unsupported direct asset terrain"],
+    "requiredCapabilityTags": ["Capability.DoesNotExist"]
+  },
+  "topology": {
+    "version": 1,
+    "id": "topology.invalid",
+    "districts": ["Broken district"],
+    "governance": "No coherent authority",
+    "historicalWound": "A deliberately invalid fixture",
+    "currentTension": "References cannot resolve",
+    "supernaturalPremise": "None beyond validation",
+    "centralThreat": "Invalid data",
+    "edges": [],
+    "landmarkLocationIds": ["location.missing"]
+  },
+  "locations": [
+    {
+      "version": 1,
+      "id": "location.tiny_home",
+      "displayName": "Tiny Home",
+      "purposeTag": "Purpose.Home",
+      "ownerResidentId": "resident.one",
+      "controllerResidentId": "",
+      "accessPolicy": "Residents",
+      "residentCapacity": 1,
+      "bRepurposable": false,
+      "requiredCapabilityTags": ["Capability.Bed"]
+    }
+  ],
+  "residents": [
+    {
+      "version": 1,
+      "id": "resident.one",
+      "displayName": "One",
+      "homeLocationId": "location.missing",
+      "workplaceLocationId": "location.missing_work",
+      "householdId": "household.crowded",
+      "occupationTag": "Occupation.Unknown",
+      "bEmployed": true,
+      "currentLocationId": "location.missing",
+      "motivation": "Exercise invalid references.",
+      "fear": "Validation will reject this resident.",
+      "importantMemories": [],
+      "availability": "Available",
+      "beliefIds": ["belief.secret"],
+      "relationshipIds": []
+    },
+    {
+      "version": 1,
+      "id": "resident.two",
+      "displayName": "Two",
+      "homeLocationId": "location.tiny_home",
+      "workplaceLocationId": "",
+      "householdId": "household.crowded",
+      "occupationTag": "",
+      "bEmployed": false,
+      "currentLocationId": "location.tiny_home",
+      "motivation": "Exercise household capacity validation.",
+      "fear": "The home is overcrowded.",
+      "importantMemories": [],
+      "availability": "Available",
+      "beliefIds": [],
+      "relationshipIds": []
+    }
+  ],
+  "households": [
+    {
+      "version": 1,
+      "id": "household.crowded",
+      "homeLocationId": "location.tiny_home",
+      "memberResidentIds": ["resident.one", "resident.two"]
+    }
+  ],
+  "relationships": [],
+  "beliefs": [
+    {
+      "version": 1,
+      "id": "belief.secret",
+      "holderResidentId": "resident.one",
+      "factId": "fact.unestablished",
+      "confidence": 1.0,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 1.0,
+      "emotionalSignificance": 1.0,
+      "willingnessToShare": 0.0
+    }
+  ],
+  "facts": [
+    {
+      "version": 1,
+      "id": "fact.unestablished",
+      "statement": "This was never established.",
+      "establishedDay": 5,
+      "bEstablished": false,
+      "bSecret": true
+    }
+  ],
+  "events": [
+    {
+      "version": 1,
+      "id": "event.too_early",
+      "day": 1,
+      "summary": "The nonexistent past is revealed.",
+      "participantResidentIds": ["resident.one"],
+      "locationIds": ["location.tiny_home"],
+      "revealedFactIds": ["fact.unestablished"]
+    }
+  ],
+  "threats": [],
+  "changeProjects": []
+}

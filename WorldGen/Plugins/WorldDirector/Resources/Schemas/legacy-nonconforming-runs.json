@@ -1,0 +1,22 @@
+{
+  "purpose": "Known pre-V2 artifacts retained for semantic inspection without weakening current validation.",
+  "runs": [
+    {
+      "runId": "20260822T093847Z-520A1FC0",
+      "missingFields": ["brief.settlementIdentity", "brief.terrainPreferences"]
+    },
+    {
+      "runId": "20260822T093913Z-213CEED8",
+      "missingFields": ["brief.settlementIdentity", "brief.terrainPreferences"]
+    },
+    {
+      "runId": "20260822T094226Z-292F9249",
+      "missingFields": ["brief.settlementIdentity", "brief.terrainPreferences"]
+    },
+    {
+      "runId": "20260822T094108Z-688BA3D6",
+      "missingFields": ["brief.settlementIdentity", "brief.terrainPreferences"],
+      "note": "No integrated stage-05 artifact was produced."
+    }
+  ]
+}

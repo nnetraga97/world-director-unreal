@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "id": "world.brackenford_compiler_fixture",
+  "seed": 481516,
+  "brief": {
+    "version": 1,
+    "id": "brief.brackenford_compiler_fixture",
+    "theme": "Stylized Medieval Frontier",
+    "settlementIdentity": "Brackenford compiler fixture",
+    "playerPrompt": "Compile the certified Brackenford capability fixture.",
+    "premises": ["Eight residents share a frontier trade settlement."],
+    "terrainPreferences": ["Flat buildable basin", "Connected perimeter roads"],
+    "requiredCapabilityTags": ["Capability.Interior", "Capability.Character.Modular"]
+  },
+  "topology": {
+    "version": 1,
+    "id": "topology.brackenford_compiler_fixture",
+    "districts": ["Homestead Row", "Trade Road", "Civic Edge"],
+    "governance": "A frontier reeve coordinates the settlement.",
+    "historicalWound": "A failed harvest consolidated work around the longhouse.",
+    "currentTension": "Households compete for trade-road access.",
+    "supernaturalPremise": "The old boundary stones are treated as protective wards.",
+    "centralThreat": "Supply shortages threaten the next winter stores.",
+    "edges": [
+      {"fromLocationId": "location.home_arden", "toLocationId": "location.home_briar", "routeType": "Path"},
+      {"fromLocationId": "location.home_briar", "toLocationId": "location.home_arden", "routeType": "Path"},
+      {"fromLocationId": "location.home_briar", "toLocationId": "location.home_cairn", "routeType": "Path"},
+      {"fromLocationId": "location.home_cairn", "toLocationId": "location.home_briar", "routeType": "Path"},
+      {"fromLocationId": "location.home_cairn", "toLocationId": "location.home_dell", "routeType": "Path"},
+      {"fromLocationId": "location.home_dell", "toLocationId": "location.home_cairn", "routeType": "Path"},
+      {"fromLocationId": "location.home_dell", "toLocationId": "location.longhouse", "routeType": "Road"},
+      {"fromLocationId": "location.longhouse", "toLocationId": "location.home_dell", "routeType": "Road"},
+      {"fromLocationId": "location.longhouse", "toLocationId": "location.inn", "routeType": "Road"},
+      {"fromLocationId": "location.inn", "toLocationId": "location.longhouse", "routeType": "Road"},
+      {"fromLocationId": "location.inn", "toLocationId": "location.guildhall", "routeType": "Road"},
+      {"fromLocationId": "location.guildhall", "toLocationId": "location.inn", "routeType": "Road"},
+      {"fromLocationId": "location.guildhall", "toLocationId": "location.watchhouse", "routeType": "Path"},
+      {"fromLocationId": "location.watchhouse", "toLocationId": "location.guildhall", "routeType": "Path"},
+      {"fromLocationId": "location.watchhouse", "toLocationId": "location.home_arden", "routeType": "Road"},
+      {"fromLocationId": "location.home_arden", "toLocationId": "location.watchhouse", "routeType": "Road"}
+    ],
+    "landmarkLocationIds": ["location.guildhall"]
+  },
+  "locations": [
+    {"version": 1, "id": "location.home_arden", "displayName": "Arden House", "purposeTag": "Purpose.Home", "ownerResidentId": "resident.mara", "controllerResidentId": "", "accessPolicy": "Residents", "residentCapacity": 2, "bRepurposable": true, "requiredCapabilityTags": ["Capability.Bed", "Capability.Door", "Capability.Interior"]},
+    {"version": 1, "id": "location.home_briar", "displayName": "Briar House", "purposeTag": "Purpose.Home", "ownerResidentId": "resident.tessa", "controllerResidentId": "", "accessPolicy": "Residents", "residentCapacity": 2, "bRepurposable": false, "requiredCapabilityTags": ["Capability.Bed", "Capability.Door", "Capability.Interior"]},
+    {"version": 1, "id": "location.home_cairn", "displayName": "Cairn House", "purposeTag": "Purpose.Home", "ownerResidentId": "resident.ivo", "controllerResidentId": "", "accessPolicy": "Residents", "residentCapacity": 2, "bRepurposable": false, "requiredCapabilityTags": ["Capability.Bed", "Capability.Door", "Capability.Interior"]},
+    {"version": 1, "id": "location.home_dell", "displayName": "Dell House", "purposeTag": "Purpose.Home", "ownerResidentId": "resident.sela", "controllerResidentId": "", "accessPolicy": "Residents", "residentCapacity": 2, "bRepurposable": true, "requiredCapabilityTags": ["Capability.Bed", "Capability.Door", "Capability.Interior"]},
+    {"version": 1, "id": "location.longhouse", "displayName": "River Longhouse", "purposeTag": "Purpose.Workplace", "ownerResidentId": "", "controllerResidentId": "resident.oren", "accessPolicy": "Workers", "residentCapacity": 8, "bRepurposable": true, "requiredCapabilityTags": ["Capability.WorkSurface", "Capability.Door", "Capability.Interior"]},
+    {"version": 1, "id": "location.inn", "displayName": "Lantern Inn", "purposeTag": "Purpose.Workplace", "ownerResidentId": "resident.tessa", "controllerResidentId": "resident.rowan", "accessPolicy": "Public", "residentCapacity": 6, "bRepurposable": true, "requiredCapabilityTags": ["Capability.Counter", "Capability.Chair", "Capability.Door"]},
+    {"version": 1, "id": "location.guildhall", "displayName": "Old Guildhall", "purposeTag": "Purpose.Workplace", "ownerResidentId": "", "controllerResidentId": "resident.sela", "accessPolicy": "Public", "residentCapacity": 10, "bRepurposable": true, "requiredCapabilityTags": ["Capability.Counter", "Capability.WorkSurface", "Capability.Chair", "Capability.Door", "Capability.Landmark"]},
+    {"version": 1, "id": "location.watchhouse", "displayName": "Frontier Watchhouse", "purposeTag": "Purpose.Workplace", "ownerResidentId": "", "controllerResidentId": "resident.bram", "accessPolicy": "Workers", "residentCapacity": 6, "bRepurposable": false, "requiredCapabilityTags": ["Capability.WorkSurface", "Capability.Door", "Capability.Interior"]}
+  ],
+  "residents": [
+    {"version": 1, "id": "resident.mara", "displayName": "Mara Arden", "homeLocationId": "location.home_arden", "workplaceLocationId": "location.longhouse", "householdId": "household.arden", "occupationTag": "Occupation.Merchant", "bEmployed": true, "currentLocationId": "location.home_arden", "motivation": "Keep the settlement supplied.", "fear": "The river road may fail.", "importantMemories": [], "availability": "Available", "beliefIds": [], "relationshipIds": []},
+    {"version": 1, "id": "resident.oren", "displayName": "Oren Arden", "homeLocationId": "location.home_arden", "workplaceLocationId": "location.longhouse", "householdId": "household.arden", "occupationTag": "Occupation.Worker", "bEmployed": true, "currentLocationId": "location.home_arden", "motivation": "Keep the longhouse working.", "fear": "Winter stores may run short.", "importantMemories": [], "availability": "Available", "beliefIds": [], "relationshipIds": []},
+    {"version": 1, "id": "resident.tessa", "displayName": "Tessa Briar", "homeLocationId": "location.home_briar", "workplaceLocationId": "location.inn", "householdId": "household.briar", "occupationTag": "Occupation.Merchant", "bEmployed": true, "currentLocationId": "location.home_briar", "motivation": "Keep the inn welcoming.", "fear": "Travelers may avoid Brackenford.", "importantMemories": [], "availability": "Available", "beliefIds": [], "relationshipIds": []},
+    {"version": 1, "id": "resident.rowan", "displayName": "Rowan Briar", "homeLocationId": "location.home_briar", "workplaceLocationId": "location.inn", "householdId": "household.briar", "occupationTag": "Occupation.Worker", "bEmployed": true, "currentLocationId": "location.home_briar", "motivation": "Support the Briar household.", "fear": "A poor season may close the inn.", "importantMemories": [], "availability": "Available", "beliefIds": [], "relationshipIds": []},
+    {"version": 1, "id": "resident.ivo", "displayName": "Ivo Cairn", "homeLocationId": "location.home_cairn", "workplaceLocationId": "location.longhouse", "householdId": "household.cairn", "occupationTag": "Occupation.Farmer", "bEmployed": true, "currentLocationId": "location.home_cairn", "motivation": "Bring in a reliable harvest.", "fear": "The fields may flood.", "importantMemories": [], "availability": "Available", "beliefIds": [], "relationshipIds": []},
+    {"version": 1, "id": "resident.lina", "displayName": "Lina Cairn", "homeLocationId": "location.home_cairn", "workplaceLocationId": "location.watchhouse", "householdId": "household.cairn", "occupationTag": "Occupation.Guard", "bEmployed": true, "currentLocationId": "location.home_cairn", "motivation": "Keep the roads safe.", "fear": "The watch may miss a warning.", "importantMemories": [], "availability": "Available", "beliefIds": [], "relationshipIds": []},
+    {"version": 1, "id": "resident.sela", "displayName": "Sela Dell", "homeLocationId": "location.home_dell", "workplaceLocationId": "location.guildhall", "householdId": "household.dell", "occupationTag": "Occupation.Reeve", "bEmployed": true, "currentLocationId": "location.home_dell", "motivation": "Keep the town council coherent.", "fear": "The households may divide.", "importantMemories": [], "availability": "Available", "beliefIds": [], "relationshipIds": []},
+    {"version": 1, "id": "resident.bram", "displayName": "Bram Dell", "homeLocationId": "location.home_dell", "workplaceLocationId": "location.watchhouse", "householdId": "household.dell", "occupationTag": "Occupation.Guard", "bEmployed": true, "currentLocationId": "location.home_dell", "motivation": "Protect the frontier hall.", "fear": "A fire may spread unnoticed.", "importantMemories": [], "availability": "Available", "beliefIds": [], "relationshipIds": []}
+  ],
+  "households": [
+    {"version": 1, "id": "household.arden", "homeLocationId": "location.home_arden", "memberResidentIds": ["resident.mara", "resident.oren"]},
+    {"version": 1, "id": "household.briar", "homeLocationId": "location.home_briar", "memberResidentIds": ["resident.tessa", "resident.rowan"]},
+    {"version": 1, "id": "household.cairn", "homeLocationId": "location.home_cairn", "memberResidentIds": ["resident.ivo", "resident.lina"]},
+    {"version": 1, "id": "household.dell", "homeLocationId": "location.home_dell", "memberResidentIds": ["resident.sela", "resident.bram"]}
+  ],
+  "relationships": [],
+  "beliefs": [],
+  "facts": [],
+  "events": [],
+  "threats": [],
+  "changeProjects": []
+}

@@ -1,0 +1,2010 @@
+{
+  "version": 1,
+  "id": "world.brackenford_living_town",
+  "seed": 481516,
+  "brief": {
+    "version": 1,
+    "id": "brief.brackenford_living_town",
+    "theme": "Stylized Medieval Frontier",
+    "settlementIdentity": "Brackenford, a river-mill frontier community",
+    "playerPrompt": "A working frontier settlement whose households depend on its mill and public hall.",
+    "premises": [
+      "Six households share the river mill and gather nightly at the frontier hall.",
+      "Private stores, debts, remedies, and old civic traditions shape what residents tell one another."
+    ],
+    "terrainPreferences": ["Flat river basin", "Walkable household ring", "Raised civic landmark"],
+    "requiredCapabilityTags": [
+      "Capability.Interior",
+      "Capability.Character.Modular"
+    ]
+  },
+  "topology": {
+    "version": 1,
+    "id": "topology.brackenford_living_town",
+    "districts": ["Household Ring", "Mill Road", "Frontier Hall"],
+    "governance": "Six household heads answer to a reeve at the frontier hall.",
+    "historicalWound": "A mill fire forced the households into debts they still dispute.",
+    "currentTension": "The mill's private stores may not last through the next lean season.",
+    "supernaturalPremise": "River lights are believed to reveal promises that will be broken.",
+    "centralThreat": "A failing mill mechanism could sever the town's food supply.",
+    "edges": [
+      {
+        "fromLocationId": "location.home_ash",
+        "toLocationId": "location.home_birch",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_birch",
+        "toLocationId": "location.home_ash",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_birch",
+        "toLocationId": "location.home_cedar",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_cedar",
+        "toLocationId": "location.home_birch",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_cedar",
+        "toLocationId": "location.home_dusk",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_dusk",
+        "toLocationId": "location.home_cedar",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_dusk",
+        "toLocationId": "location.home_ember",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_ember",
+        "toLocationId": "location.home_dusk",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_ember",
+        "toLocationId": "location.home_fern",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_fern",
+        "toLocationId": "location.home_ember",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.home_fern",
+        "toLocationId": "location.river_mill",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.river_mill",
+        "toLocationId": "location.home_fern",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.river_mill",
+        "toLocationId": "location.frontier_hall",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.frontier_hall",
+        "toLocationId": "location.river_mill",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.frontier_hall",
+        "toLocationId": "location.home_ash",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.home_ash",
+        "toLocationId": "location.frontier_hall",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.frontier_hall",
+        "toLocationId": "location.market_square",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.market_square",
+        "toLocationId": "location.frontier_hall",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.market_square",
+        "toLocationId": "location.healing_house",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.healing_house",
+        "toLocationId": "location.market_square",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.healing_house",
+        "toLocationId": "location.granary",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.granary",
+        "toLocationId": "location.healing_house",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.granary",
+        "toLocationId": "location.pilgrim_shelter",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.pilgrim_shelter",
+        "toLocationId": "location.granary",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.pilgrim_shelter",
+        "toLocationId": "location.wardens_lodge",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.wardens_lodge",
+        "toLocationId": "location.pilgrim_shelter",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.wardens_lodge",
+        "toLocationId": "location.river_shrine",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.river_shrine",
+        "toLocationId": "location.wardens_lodge",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.river_shrine",
+        "toLocationId": "location.council_archive",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.council_archive",
+        "toLocationId": "location.river_shrine",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.council_archive",
+        "toLocationId": "location.ferry_house",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.ferry_house",
+        "toLocationId": "location.council_archive",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.ferry_house",
+        "toLocationId": "location.commons_shed",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.commons_shed",
+        "toLocationId": "location.ferry_house",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.commons_shed",
+        "toLocationId": "location.bell_tower",
+        "routeType": "Road"
+      },
+      {
+        "fromLocationId": "location.bell_tower",
+        "toLocationId": "location.commons_shed",
+        "routeType": "Road"
+      }
+    ],
+    "landmarkLocationIds": [
+      "location.frontier_hall"
+    ]
+  },
+  "locations": [
+    {
+      "version": 1,
+      "id": "location.home_ash",
+      "displayName": "Ash House",
+      "purposeTag": "Purpose.Home",
+      "ownerResidentId": "resident.mara",
+      "controllerResidentId": "",
+      "accessPolicy": "Residents",
+      "residentCapacity": 4,
+      "bRepurposable": true,
+      "requiredCapabilityTags": [
+        "Capability.Bed",
+        "Capability.Chair",
+        "Capability.Door",
+        "Capability.Interior"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.home_birch",
+      "displayName": "Birch House",
+      "purposeTag": "Purpose.Home",
+      "ownerResidentId": "resident.ivo",
+      "controllerResidentId": "",
+      "accessPolicy": "Residents",
+      "residentCapacity": 4,
+      "bRepurposable": false,
+      "requiredCapabilityTags": [
+        "Capability.Bed",
+        "Capability.Chair",
+        "Capability.Door",
+        "Capability.Interior"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.home_cedar",
+      "displayName": "Cedar House",
+      "purposeTag": "Purpose.Home",
+      "ownerResidentId": "resident.anwen",
+      "controllerResidentId": "",
+      "accessPolicy": "Residents",
+      "residentCapacity": 4,
+      "bRepurposable": true,
+      "requiredCapabilityTags": [
+        "Capability.Bed",
+        "Capability.Chair",
+        "Capability.Door",
+        "Capability.Interior"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.home_dusk",
+      "displayName": "Dusk House",
+      "purposeTag": "Purpose.Home",
+      "ownerResidentId": "resident.fara",
+      "controllerResidentId": "",
+      "accessPolicy": "Residents",
+      "residentCapacity": 4,
+      "bRepurposable": false,
+      "requiredCapabilityTags": [
+        "Capability.Bed",
+        "Capability.Chair",
+        "Capability.Door",
+        "Capability.Interior"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.home_ember",
+      "displayName": "Ember House",
+      "purposeTag": "Purpose.Home",
+      "ownerResidentId": "resident.kara",
+      "controllerResidentId": "",
+      "accessPolicy": "Residents",
+      "residentCapacity": 4,
+      "bRepurposable": true,
+      "requiredCapabilityTags": [
+        "Capability.Bed",
+        "Capability.Chair",
+        "Capability.Door",
+        "Capability.Interior"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.home_fern",
+      "displayName": "Fern House",
+      "purposeTag": "Purpose.Home",
+      "ownerResidentId": "resident.orla",
+      "controllerResidentId": "",
+      "accessPolicy": "Residents",
+      "residentCapacity": 4,
+      "bRepurposable": false,
+      "requiredCapabilityTags": [
+        "Capability.Bed",
+        "Capability.Chair",
+        "Capability.Door",
+        "Capability.Interior"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.river_mill",
+      "displayName": "Brackenford River Mill",
+      "purposeTag": "Purpose.Workplace",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.mara",
+      "accessPolicy": "Workers",
+      "residentCapacity": 12,
+      "bRepurposable": true,
+      "requiredCapabilityTags": [
+        "Capability.WorkSurface",
+        "Capability.Counter",
+        "Capability.Door",
+        "Capability.Interior"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.frontier_hall",
+      "displayName": "Brackenford Frontier Hall",
+      "purposeTag": "Purpose.Landmark",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.sela",
+      "accessPolicy": "Public",
+      "residentCapacity": 12,
+      "bRepurposable": true,
+      "requiredCapabilityTags": [
+        "Capability.WorkSurface",
+        "Capability.Counter",
+        "Capability.Chair",
+        "Capability.Door",
+        "Capability.Interior",
+        "Capability.Landmark"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.market_square",
+      "displayName": "Covered Market",
+      "purposeTag": "Purpose.Workplace",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.oren",
+      "accessPolicy": "Public",
+      "residentCapacity": 8,
+      "bRepurposable": true,
+      "requiredCapabilityTags": ["Capability.Counter", "Capability.Chair", "Capability.Door", "Capability.Interior"]
+    },
+    {
+      "version": 1,
+      "id": "location.healing_house",
+      "displayName": "Healing House",
+      "purposeTag": "Purpose.Clinic",
+      "ownerResidentId": "resident.anwen",
+      "controllerResidentId": "resident.anwen",
+      "accessPolicy": "Public",
+      "residentCapacity": 6,
+      "bRepurposable": true,
+      "requiredCapabilityTags": ["Capability.Bed", "Capability.WorkSurface", "Capability.Chair", "Capability.Door", "Capability.Interior"]
+    },
+    {
+      "version": 1,
+      "id": "location.granary",
+      "displayName": "Common Granary",
+      "purposeTag": "Purpose.Workplace",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.kara",
+      "accessPolicy": "Workers",
+      "residentCapacity": 8,
+      "bRepurposable": true,
+      "requiredCapabilityTags": ["Capability.WorkSurface", "Capability.Counter", "Capability.Door", "Capability.Interior"]
+    },
+    {
+      "version": 1,
+      "id": "location.pilgrim_shelter",
+      "displayName": "Pilgrim Shelter",
+      "purposeTag": "Purpose.Shelter",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.orla",
+      "accessPolicy": "Public",
+      "residentCapacity": 6,
+      "bRepurposable": true,
+      "requiredCapabilityTags": ["Capability.Bed", "Capability.Chair", "Capability.Door", "Capability.Interior"]
+    },
+    {
+      "version": 1,
+      "id": "location.wardens_lodge",
+      "displayName": "Warden's Lodge",
+      "purposeTag": "Purpose.Headquarters",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.rhea",
+      "accessPolicy": "Restricted",
+      "residentCapacity": 6,
+      "bRepurposable": true,
+      "requiredCapabilityTags": ["Capability.WorkSurface", "Capability.Counter", "Capability.Chair", "Capability.Door", "Capability.Interior"]
+    },
+    {
+      "version": 1,
+      "id": "location.river_shrine",
+      "displayName": "River Shrine",
+      "purposeTag": "Purpose.Landmark",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.hesta",
+      "accessPolicy": "Public",
+      "residentCapacity": 6,
+      "bRepurposable": false,
+      "requiredCapabilityTags": ["Capability.Chair", "Capability.Door", "Capability.Interior", "Capability.Landmark"]
+    },
+    {
+      "version": 1,
+      "id": "location.council_archive",
+      "displayName": "Council Archive",
+      "purposeTag": "Purpose.Headquarters",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.oren",
+      "accessPolicy": "Restricted",
+      "residentCapacity": 6,
+      "bRepurposable": true,
+      "requiredCapabilityTags": ["Capability.WorkSurface", "Capability.Chair", "Capability.Door", "Capability.Interior"]
+    },
+    {
+      "version": 1,
+      "id": "location.ferry_house",
+      "displayName": "Ferry House",
+      "purposeTag": "Purpose.Workplace",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.tobin",
+      "accessPolicy": "Workers",
+      "residentCapacity": 6,
+      "bRepurposable": true,
+      "requiredCapabilityTags": ["Capability.WorkSurface", "Capability.Counter", "Capability.Door", "Capability.Interior"]
+    },
+    {
+      "version": 1,
+      "id": "location.commons_shed",
+      "displayName": "Commons Shed",
+      "purposeTag": "Purpose.Shelter",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.della",
+      "accessPolicy": "Public",
+      "residentCapacity": 6,
+      "bRepurposable": true,
+      "requiredCapabilityTags": ["Capability.Bed", "Capability.Chair", "Capability.Door", "Capability.Interior"]
+    },
+    {
+      "version": 1,
+      "id": "location.bell_tower",
+      "displayName": "Founders' Bell Tower",
+      "purposeTag": "Purpose.Landmark",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.sela",
+      "accessPolicy": "Public",
+      "residentCapacity": 6,
+      "bRepurposable": false,
+      "requiredCapabilityTags": ["Capability.Chair", "Capability.Door", "Capability.Interior", "Capability.Landmark"]
+    }
+  ],
+  "residents": [
+    {
+      "version": 1,
+      "id": "resident.mara",
+      "displayName": "Mara Ash",
+      "homeLocationId": "location.home_ash",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.ash",
+      "occupationTag": "Occupation.Merchant",
+      "bEmployed": true,
+      "currentLocationId": "location.home_ash",
+      "motivation": "Keep the frontier supplied through the coming season.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.mara_founding",
+          "factId": "fact.river_stones",
+          "summary": "Mara remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.55
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.mara_river_stones"
+      ],
+      "relationshipIds": [
+        "relationship.mara_oren",
+        "relationship.mara_tessa"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.oren",
+      "displayName": "Oren Ash",
+      "homeLocationId": "location.home_ash",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.ash",
+      "occupationTag": "Occupation.Worker",
+      "bEmployed": true,
+      "currentLocationId": "location.home_ash",
+      "motivation": "Protect the household's standing in Brackenford.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.oren_founding",
+          "factId": "fact.north_store",
+          "summary": "Oren remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.65
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.oren_north_store"
+      ],
+      "relationshipIds": [
+        "relationship.oren_mara"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.tessa",
+      "displayName": "Tessa Ash",
+      "homeLocationId": "location.home_ash",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.ash",
+      "occupationTag": "Occupation.Farmer",
+      "bEmployed": true,
+      "currentLocationId": "location.home_ash",
+      "motivation": "Make useful work visible to the wider town.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.tessa_founding",
+          "factId": "fact.old_oath",
+          "summary": "Tessa remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.75
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.tessa_old_oath"
+      ],
+      "relationshipIds": [
+        "relationship.tessa_rowan",
+        "relationship.tessa_mara",
+        "relationship.tessa_ivo"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.rowan",
+      "displayName": "Rowan Ash",
+      "homeLocationId": "location.home_ash",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.ash",
+      "occupationTag": "Occupation.Guard",
+      "bEmployed": true,
+      "currentLocationId": "location.home_ash",
+      "motivation": "Keep the frontier supplied through the coming season.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.rowan_founding",
+          "factId": "fact.herb_patch",
+          "summary": "Rowan remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.8500000000000001
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.rowan_herb_patch"
+      ],
+      "relationshipIds": [
+        "relationship.rowan_tessa"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.ivo",
+      "displayName": "Ivo Birch",
+      "homeLocationId": "location.home_birch",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.birch",
+      "occupationTag": "Occupation.Herbalist",
+      "bEmployed": true,
+      "currentLocationId": "location.home_birch",
+      "motivation": "Protect the household's standing in Brackenford.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.ivo_founding",
+          "factId": "fact.mill_debt",
+          "summary": "Ivo remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.55
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.ivo_mill_debt"
+      ],
+      "relationshipIds": [
+        "relationship.ivo_lina",
+        "relationship.ivo_tessa",
+        "relationship.ivo_sela"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.lina",
+      "displayName": "Lina Birch",
+      "homeLocationId": "location.home_birch",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.birch",
+      "occupationTag": "Occupation.Worker",
+      "bEmployed": true,
+      "currentLocationId": "location.home_birch",
+      "motivation": "Make useful work visible to the wider town.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.lina_founding",
+          "factId": "fact.watch_fire",
+          "summary": "Lina remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.65
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.lina_watch_fire"
+      ],
+      "relationshipIds": [
+        "relationship.lina_ivo"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.sela",
+      "displayName": "Sela Birch",
+      "homeLocationId": "location.home_birch",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.birch",
+      "occupationTag": "Occupation.Farmer",
+      "bEmployed": true,
+      "currentLocationId": "location.home_birch",
+      "motivation": "Keep the frontier supplied through the coming season.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.sela_founding",
+          "factId": "fact.river_stones",
+          "summary": "Sela remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.75
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.sela_river_stones"
+      ],
+      "relationshipIds": [
+        "relationship.sela_bram",
+        "relationship.sela_ivo",
+        "relationship.sela_anwen"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.bram",
+      "displayName": "Bram Birch",
+      "homeLocationId": "location.home_birch",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.birch",
+      "occupationTag": "Occupation.Guard",
+      "bEmployed": true,
+      "currentLocationId": "location.home_birch",
+      "motivation": "Protect the household's standing in Brackenford.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.bram_founding",
+          "factId": "fact.north_store",
+          "summary": "Bram remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.8500000000000001
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.bram_north_store"
+      ],
+      "relationshipIds": [
+        "relationship.bram_sela"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.anwen",
+      "displayName": "Anwen Cedar",
+      "homeLocationId": "location.home_cedar",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.cedar",
+      "occupationTag": "Occupation.Merchant",
+      "bEmployed": true,
+      "currentLocationId": "location.home_cedar",
+      "motivation": "Make useful work visible to the wider town.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.anwen_founding",
+          "factId": "fact.old_oath",
+          "summary": "Anwen remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.55
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.anwen_old_oath"
+      ],
+      "relationshipIds": [
+        "relationship.anwen_corin",
+        "relationship.anwen_sela",
+        "relationship.anwen_della"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.corin",
+      "displayName": "Corin Cedar",
+      "homeLocationId": "location.home_cedar",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.cedar",
+      "occupationTag": "Occupation.Worker",
+      "bEmployed": true,
+      "currentLocationId": "location.home_cedar",
+      "motivation": "Keep the frontier supplied through the coming season.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.corin_founding",
+          "factId": "fact.herb_patch",
+          "summary": "Corin remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.65
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.corin_herb_patch"
+      ],
+      "relationshipIds": [
+        "relationship.corin_anwen"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.della",
+      "displayName": "Della Cedar",
+      "homeLocationId": "location.home_cedar",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.cedar",
+      "occupationTag": "Occupation.Farmer",
+      "bEmployed": true,
+      "currentLocationId": "location.home_cedar",
+      "motivation": "Protect the household's standing in Brackenford.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.della_founding",
+          "factId": "fact.mill_debt",
+          "summary": "Della remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.75
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.della_mill_debt"
+      ],
+      "relationshipIds": [
+        "relationship.della_eryk",
+        "relationship.della_anwen",
+        "relationship.della_fara"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.eryk",
+      "displayName": "Eryk Cedar",
+      "homeLocationId": "location.home_cedar",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.cedar",
+      "occupationTag": "Occupation.Guard",
+      "bEmployed": true,
+      "currentLocationId": "location.home_cedar",
+      "motivation": "Make useful work visible to the wider town.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.eryk_founding",
+          "factId": "fact.watch_fire",
+          "summary": "Eryk remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.8500000000000001
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.eryk_watch_fire"
+      ],
+      "relationshipIds": [
+        "relationship.eryk_della"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.fara",
+      "displayName": "Fara Dusk",
+      "homeLocationId": "location.home_dusk",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.dusk",
+      "occupationTag": "Occupation.Reeve",
+      "bEmployed": true,
+      "currentLocationId": "location.home_dusk",
+      "motivation": "Keep the frontier supplied through the coming season.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.fara_founding",
+          "factId": "fact.river_stones",
+          "summary": "Fara remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.55
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.fara_river_stones"
+      ],
+      "relationshipIds": [
+        "relationship.fara_galen",
+        "relationship.fara_della",
+        "relationship.fara_hesta"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.galen",
+      "displayName": "Galen Dusk",
+      "homeLocationId": "location.home_dusk",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.dusk",
+      "occupationTag": "Occupation.Worker",
+      "bEmployed": true,
+      "currentLocationId": "location.home_dusk",
+      "motivation": "Protect the household's standing in Brackenford.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.galen_founding",
+          "factId": "fact.north_store",
+          "summary": "Galen remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.65
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.galen_north_store"
+      ],
+      "relationshipIds": [
+        "relationship.galen_fara"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.hesta",
+      "displayName": "Hesta Dusk",
+      "homeLocationId": "location.home_dusk",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.dusk",
+      "occupationTag": "Occupation.Farmer",
+      "bEmployed": true,
+      "currentLocationId": "location.home_dusk",
+      "motivation": "Make useful work visible to the wider town.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.hesta_founding",
+          "factId": "fact.old_oath",
+          "summary": "Hesta remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.75
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.hesta_old_oath"
+      ],
+      "relationshipIds": [
+        "relationship.hesta_jorin",
+        "relationship.hesta_fara",
+        "relationship.hesta_kara"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.jorin",
+      "displayName": "Jorin Dusk",
+      "homeLocationId": "location.home_dusk",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.dusk",
+      "occupationTag": "Occupation.Guard",
+      "bEmployed": true,
+      "currentLocationId": "location.home_dusk",
+      "motivation": "Keep the frontier supplied through the coming season.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.jorin_founding",
+          "factId": "fact.herb_patch",
+          "summary": "Jorin remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.8500000000000001
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.jorin_herb_patch"
+      ],
+      "relationshipIds": [
+        "relationship.jorin_hesta"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.kara",
+      "displayName": "Kara Ember",
+      "homeLocationId": "location.home_ember",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.ember",
+      "occupationTag": "Occupation.Herbalist",
+      "bEmployed": true,
+      "currentLocationId": "location.home_ember",
+      "motivation": "Protect the household's standing in Brackenford.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.kara_founding",
+          "factId": "fact.mill_debt",
+          "summary": "Kara remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.55
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.kara_mill_debt"
+      ],
+      "relationshipIds": [
+        "relationship.kara_leif",
+        "relationship.kara_hesta",
+        "relationship.kara_mira"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.leif",
+      "displayName": "Leif Ember",
+      "homeLocationId": "location.home_ember",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.ember",
+      "occupationTag": "Occupation.Worker",
+      "bEmployed": true,
+      "currentLocationId": "location.home_ember",
+      "motivation": "Make useful work visible to the wider town.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.leif_founding",
+          "factId": "fact.watch_fire",
+          "summary": "Leif remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.65
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.leif_watch_fire"
+      ],
+      "relationshipIds": [
+        "relationship.leif_kara"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.mira",
+      "displayName": "Mira Ember",
+      "homeLocationId": "location.home_ember",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.ember",
+      "occupationTag": "Occupation.Farmer",
+      "bEmployed": true,
+      "currentLocationId": "location.home_ember",
+      "motivation": "Keep the frontier supplied through the coming season.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.mira_founding",
+          "factId": "fact.river_stones",
+          "summary": "Mira remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.75
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.mira_river_stones"
+      ],
+      "relationshipIds": [
+        "relationship.mira_nolan",
+        "relationship.mira_kara",
+        "relationship.mira_orla"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.nolan",
+      "displayName": "Nolan Ember",
+      "homeLocationId": "location.home_ember",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.ember",
+      "occupationTag": "Occupation.Guard",
+      "bEmployed": true,
+      "currentLocationId": "location.home_ember",
+      "motivation": "Protect the household's standing in Brackenford.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.nolan_founding",
+          "factId": "fact.north_store",
+          "summary": "Nolan remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.8500000000000001
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.nolan_north_store"
+      ],
+      "relationshipIds": [
+        "relationship.nolan_mira"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.orla",
+      "displayName": "Orla Fern",
+      "homeLocationId": "location.home_fern",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.fern",
+      "occupationTag": "Occupation.Merchant",
+      "bEmployed": true,
+      "currentLocationId": "location.home_fern",
+      "motivation": "Make useful work visible to the wider town.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.orla_founding",
+          "factId": "fact.old_oath",
+          "summary": "Orla remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.55
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.orla_old_oath"
+      ],
+      "relationshipIds": [
+        "relationship.orla_perrin",
+        "relationship.orla_mira",
+        "relationship.orla_rhea"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.perrin",
+      "displayName": "Perrin Fern",
+      "homeLocationId": "location.home_fern",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.fern",
+      "occupationTag": "Occupation.Worker",
+      "bEmployed": true,
+      "currentLocationId": "location.home_fern",
+      "motivation": "Keep the frontier supplied through the coming season.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.perrin_founding",
+          "factId": "fact.herb_patch",
+          "summary": "Perrin remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.65
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.perrin_herb_patch"
+      ],
+      "relationshipIds": [
+        "relationship.perrin_orla"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.rhea",
+      "displayName": "Rhea Fern",
+      "homeLocationId": "location.home_fern",
+      "workplaceLocationId": "location.river_mill",
+      "householdId": "household.fern",
+      "occupationTag": "Occupation.Farmer",
+      "bEmployed": true,
+      "currentLocationId": "location.home_fern",
+      "motivation": "Protect the household's standing in Brackenford.",
+      "fear": "A failed harvest will divide the households.",
+      "importantMemories": [
+        {
+          "id": "memory.rhea_founding",
+          "factId": "fact.mill_debt",
+          "summary": "Rhea remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.75
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.rhea_mill_debt"
+      ],
+      "relationshipIds": [
+        "relationship.rhea_tobin",
+        "relationship.rhea_orla"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "resident.tobin",
+      "displayName": "Tobin Fern",
+      "homeLocationId": "location.home_fern",
+      "workplaceLocationId": "location.frontier_hall",
+      "householdId": "household.fern",
+      "occupationTag": "Occupation.Guard",
+      "bEmployed": true,
+      "currentLocationId": "location.home_fern",
+      "motivation": "Make useful work visible to the wider town.",
+      "fear": "A private debt will become public at the hall.",
+      "importantMemories": [
+        {
+          "id": "memory.tobin_founding",
+          "factId": "fact.watch_fire",
+          "summary": "Tobin remembers why this fact matters to the household.",
+          "day": 0,
+          "emotionalSignificance": 0.8500000000000001
+        }
+      ],
+      "availability": "Available",
+      "beliefIds": [
+        "belief.tobin_watch_fire"
+      ],
+      "relationshipIds": [
+        "relationship.tobin_rhea"
+      ]
+    }
+  ],
+  "households": [
+    {
+      "version": 1,
+      "id": "household.ash",
+      "homeLocationId": "location.home_ash",
+      "memberResidentIds": [
+        "resident.mara",
+        "resident.oren",
+        "resident.tessa",
+        "resident.rowan"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "household.birch",
+      "homeLocationId": "location.home_birch",
+      "memberResidentIds": [
+        "resident.ivo",
+        "resident.lina",
+        "resident.sela",
+        "resident.bram"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "household.cedar",
+      "homeLocationId": "location.home_cedar",
+      "memberResidentIds": [
+        "resident.anwen",
+        "resident.corin",
+        "resident.della",
+        "resident.eryk"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "household.dusk",
+      "homeLocationId": "location.home_dusk",
+      "memberResidentIds": [
+        "resident.fara",
+        "resident.galen",
+        "resident.hesta",
+        "resident.jorin"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "household.ember",
+      "homeLocationId": "location.home_ember",
+      "memberResidentIds": [
+        "resident.kara",
+        "resident.leif",
+        "resident.mira",
+        "resident.nolan"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "household.fern",
+      "homeLocationId": "location.home_fern",
+      "memberResidentIds": [
+        "resident.orla",
+        "resident.perrin",
+        "resident.rhea",
+        "resident.tobin"
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "version": 1,
+      "id": "relationship.mara_oren",
+      "sourceResidentId": "resident.mara",
+      "targetResidentId": "resident.oren",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.oren_mara",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.oren_mara",
+      "sourceResidentId": "resident.oren",
+      "targetResidentId": "resident.mara",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.mara_oren",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.tessa_rowan",
+      "sourceResidentId": "resident.tessa",
+      "targetResidentId": "resident.rowan",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.rowan_tessa",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.rowan_tessa",
+      "sourceResidentId": "resident.rowan",
+      "targetResidentId": "resident.tessa",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.tessa_rowan",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.ivo_lina",
+      "sourceResidentId": "resident.ivo",
+      "targetResidentId": "resident.lina",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.lina_ivo",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.lina_ivo",
+      "sourceResidentId": "resident.lina",
+      "targetResidentId": "resident.ivo",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.ivo_lina",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.sela_bram",
+      "sourceResidentId": "resident.sela",
+      "targetResidentId": "resident.bram",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.bram_sela",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.bram_sela",
+      "sourceResidentId": "resident.bram",
+      "targetResidentId": "resident.sela",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.sela_bram",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.anwen_corin",
+      "sourceResidentId": "resident.anwen",
+      "targetResidentId": "resident.corin",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.corin_anwen",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.corin_anwen",
+      "sourceResidentId": "resident.corin",
+      "targetResidentId": "resident.anwen",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.anwen_corin",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.della_eryk",
+      "sourceResidentId": "resident.della",
+      "targetResidentId": "resident.eryk",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.eryk_della",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.eryk_della",
+      "sourceResidentId": "resident.eryk",
+      "targetResidentId": "resident.della",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.della_eryk",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.fara_galen",
+      "sourceResidentId": "resident.fara",
+      "targetResidentId": "resident.galen",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.galen_fara",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.galen_fara",
+      "sourceResidentId": "resident.galen",
+      "targetResidentId": "resident.fara",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.fara_galen",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.hesta_jorin",
+      "sourceResidentId": "resident.hesta",
+      "targetResidentId": "resident.jorin",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.jorin_hesta",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.jorin_hesta",
+      "sourceResidentId": "resident.jorin",
+      "targetResidentId": "resident.hesta",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.hesta_jorin",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.kara_leif",
+      "sourceResidentId": "resident.kara",
+      "targetResidentId": "resident.leif",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.leif_kara",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.leif_kara",
+      "sourceResidentId": "resident.leif",
+      "targetResidentId": "resident.kara",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.kara_leif",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.mira_nolan",
+      "sourceResidentId": "resident.mira",
+      "targetResidentId": "resident.nolan",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.nolan_mira",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.nolan_mira",
+      "sourceResidentId": "resident.nolan",
+      "targetResidentId": "resident.mira",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.mira_nolan",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.orla_perrin",
+      "sourceResidentId": "resident.orla",
+      "targetResidentId": "resident.perrin",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.perrin_orla",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.perrin_orla",
+      "sourceResidentId": "resident.perrin",
+      "targetResidentId": "resident.orla",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.orla_perrin",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1,
+      "id": "relationship.rhea_tobin",
+      "sourceResidentId": "resident.rhea",
+      "targetResidentId": "resident.tobin",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.tobin_rhea",
+      "trust": 0.72,
+      "affinity": 0.68,
+      "fear": 0.05,
+      "obligation": 0.4
+    },
+    {
+      "version": 1,
+      "id": "relationship.tobin_rhea",
+      "sourceResidentId": "resident.tobin",
+      "targetResidentId": "resident.rhea",
+      "relationshipType": "Household.Trusted",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.rhea_tobin",
+      "trust": 0.7,
+      "affinity": 0.66,
+      "fear": 0.04,
+      "obligation": 0.42
+    },
+    {
+      "version": 1, "id": "relationship.mara_tessa", "sourceResidentId": "resident.mara", "targetResidentId": "resident.tessa", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.tessa_mara", "trust": 0.66, "affinity": 0.58, "fear": 0.03, "obligation": 0.35
+    },
+    {
+      "version": 1, "id": "relationship.tessa_mara", "sourceResidentId": "resident.tessa", "targetResidentId": "resident.mara", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.mara_tessa", "trust": 0.64, "affinity": 0.6, "fear": 0.02, "obligation": 0.33
+    },
+    {
+      "version": 1, "id": "relationship.tessa_ivo", "sourceResidentId": "resident.tessa", "targetResidentId": "resident.ivo", "relationshipType": "Community.Trade", "bBidirectional": true, "reciprocalRelationshipId": "relationship.ivo_tessa", "trust": 0.62, "affinity": 0.54, "fear": 0.04, "obligation": 0.4
+    },
+    {
+      "version": 1, "id": "relationship.ivo_tessa", "sourceResidentId": "resident.ivo", "targetResidentId": "resident.tessa", "relationshipType": "Community.Trade", "bBidirectional": true, "reciprocalRelationshipId": "relationship.tessa_ivo", "trust": 0.6, "affinity": 0.55, "fear": 0.03, "obligation": 0.38
+    },
+    {
+      "version": 1, "id": "relationship.ivo_sela", "sourceResidentId": "resident.ivo", "targetResidentId": "resident.sela", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.sela_ivo", "trust": 0.68, "affinity": 0.59, "fear": 0.02, "obligation": 0.31
+    },
+    {
+      "version": 1, "id": "relationship.sela_ivo", "sourceResidentId": "resident.sela", "targetResidentId": "resident.ivo", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.ivo_sela", "trust": 0.65, "affinity": 0.57, "fear": 0.03, "obligation": 0.34
+    },
+    {
+      "version": 1, "id": "relationship.sela_anwen", "sourceResidentId": "resident.sela", "targetResidentId": "resident.anwen", "relationshipType": "Community.Civic", "bBidirectional": true, "reciprocalRelationshipId": "relationship.anwen_sela", "trust": 0.7, "affinity": 0.61, "fear": 0.02, "obligation": 0.46
+    },
+    {
+      "version": 1, "id": "relationship.anwen_sela", "sourceResidentId": "resident.anwen", "targetResidentId": "resident.sela", "relationshipType": "Community.Civic", "bBidirectional": true, "reciprocalRelationshipId": "relationship.sela_anwen", "trust": 0.67, "affinity": 0.6, "fear": 0.03, "obligation": 0.44
+    },
+    {
+      "version": 1, "id": "relationship.anwen_della", "sourceResidentId": "resident.anwen", "targetResidentId": "resident.della", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.della_anwen", "trust": 0.64, "affinity": 0.58, "fear": 0.03, "obligation": 0.32
+    },
+    {
+      "version": 1, "id": "relationship.della_anwen", "sourceResidentId": "resident.della", "targetResidentId": "resident.anwen", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.anwen_della", "trust": 0.63, "affinity": 0.56, "fear": 0.04, "obligation": 0.35
+    },
+    {
+      "version": 1, "id": "relationship.della_fara", "sourceResidentId": "resident.della", "targetResidentId": "resident.fara", "relationshipType": "Community.Trade", "bBidirectional": true, "reciprocalRelationshipId": "relationship.fara_della", "trust": 0.61, "affinity": 0.53, "fear": 0.05, "obligation": 0.41
+    },
+    {
+      "version": 1, "id": "relationship.fara_della", "sourceResidentId": "resident.fara", "targetResidentId": "resident.della", "relationshipType": "Community.Trade", "bBidirectional": true, "reciprocalRelationshipId": "relationship.della_fara", "trust": 0.6, "affinity": 0.54, "fear": 0.04, "obligation": 0.39
+    },
+    {
+      "version": 1, "id": "relationship.fara_hesta", "sourceResidentId": "resident.fara", "targetResidentId": "resident.hesta", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.hesta_fara", "trust": 0.66, "affinity": 0.57, "fear": 0.03, "obligation": 0.33
+    },
+    {
+      "version": 1, "id": "relationship.hesta_fara", "sourceResidentId": "resident.hesta", "targetResidentId": "resident.fara", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.fara_hesta", "trust": 0.65, "affinity": 0.59, "fear": 0.02, "obligation": 0.34
+    },
+    {
+      "version": 1, "id": "relationship.hesta_kara", "sourceResidentId": "resident.hesta", "targetResidentId": "resident.kara", "relationshipType": "Community.Civic", "bBidirectional": true, "reciprocalRelationshipId": "relationship.kara_hesta", "trust": 0.69, "affinity": 0.6, "fear": 0.02, "obligation": 0.45
+    },
+    {
+      "version": 1, "id": "relationship.kara_hesta", "sourceResidentId": "resident.kara", "targetResidentId": "resident.hesta", "relationshipType": "Community.Civic", "bBidirectional": true, "reciprocalRelationshipId": "relationship.hesta_kara", "trust": 0.67, "affinity": 0.58, "fear": 0.03, "obligation": 0.43
+    },
+    {
+      "version": 1, "id": "relationship.kara_mira", "sourceResidentId": "resident.kara", "targetResidentId": "resident.mira", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.mira_kara", "trust": 0.65, "affinity": 0.58, "fear": 0.03, "obligation": 0.34
+    },
+    {
+      "version": 1, "id": "relationship.mira_kara", "sourceResidentId": "resident.mira", "targetResidentId": "resident.kara", "relationshipType": "Community.Neighbor", "bBidirectional": true, "reciprocalRelationshipId": "relationship.kara_mira", "trust": 0.64, "affinity": 0.57, "fear": 0.03, "obligation": 0.35
+    },
+    {
+      "version": 1, "id": "relationship.mira_orla", "sourceResidentId": "resident.mira", "targetResidentId": "resident.orla", "relationshipType": "Community.Trade", "bBidirectional": true, "reciprocalRelationshipId": "relationship.orla_mira", "trust": 0.62, "affinity": 0.55, "fear": 0.04, "obligation": 0.4
+    },
+    {
+      "version": 1, "id": "relationship.orla_mira", "sourceResidentId": "resident.orla", "targetResidentId": "resident.mira", "relationshipType": "Community.Trade", "bBidirectional": true, "reciprocalRelationshipId": "relationship.mira_orla", "trust": 0.61, "affinity": 0.56, "fear": 0.03, "obligation": 0.39
+    },
+    {
+      "version": 1, "id": "relationship.orla_rhea", "sourceResidentId": "resident.orla", "targetResidentId": "resident.rhea", "relationshipType": "Community.Civic", "bBidirectional": true, "reciprocalRelationshipId": "relationship.rhea_orla", "trust": 0.7, "affinity": 0.6, "fear": 0.02, "obligation": 0.44
+    },
+    {
+      "version": 1, "id": "relationship.rhea_orla", "sourceResidentId": "resident.rhea", "targetResidentId": "resident.orla", "relationshipType": "Community.Civic", "bBidirectional": true, "reciprocalRelationshipId": "relationship.orla_rhea", "trust": 0.68, "affinity": 0.61, "fear": 0.02, "obligation": 0.45
+    }
+  ],
+  "beliefs": [
+    {
+      "version": 1,
+      "id": "belief.mara_river_stones",
+      "holderResidentId": "resident.mara",
+      "factId": "fact.river_stones",
+      "confidence": 0.82,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.5,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.oren_north_store",
+      "holderResidentId": "resident.oren",
+      "factId": "fact.north_store",
+      "confidence": 0.87,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.6,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.tessa_old_oath",
+      "holderResidentId": "resident.tessa",
+      "factId": "fact.old_oath",
+      "confidence": 0.9199999999999999,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.7,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.rowan_herb_patch",
+      "holderResidentId": "resident.rowan",
+      "factId": "fact.herb_patch",
+      "confidence": 0.82,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.8,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.ivo_mill_debt",
+      "holderResidentId": "resident.ivo",
+      "factId": "fact.mill_debt",
+      "confidence": 0.87,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.5,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.lina_watch_fire",
+      "holderResidentId": "resident.lina",
+      "factId": "fact.watch_fire",
+      "confidence": 0.9199999999999999,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.6,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.sela_river_stones",
+      "holderResidentId": "resident.sela",
+      "factId": "fact.river_stones",
+      "confidence": 0.82,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.7,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.bram_north_store",
+      "holderResidentId": "resident.bram",
+      "factId": "fact.north_store",
+      "confidence": 0.87,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.8,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.anwen_old_oath",
+      "holderResidentId": "resident.anwen",
+      "factId": "fact.old_oath",
+      "confidence": 0.9199999999999999,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.5,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.corin_herb_patch",
+      "holderResidentId": "resident.corin",
+      "factId": "fact.herb_patch",
+      "confidence": 0.82,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.6,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.della_mill_debt",
+      "holderResidentId": "resident.della",
+      "factId": "fact.mill_debt",
+      "confidence": 0.87,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.7,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.eryk_watch_fire",
+      "holderResidentId": "resident.eryk",
+      "factId": "fact.watch_fire",
+      "confidence": 0.9199999999999999,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.8,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.fara_river_stones",
+      "holderResidentId": "resident.fara",
+      "factId": "fact.river_stones",
+      "confidence": 0.82,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.5,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.galen_north_store",
+      "holderResidentId": "resident.galen",
+      "factId": "fact.north_store",
+      "confidence": 0.87,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.6,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.hesta_old_oath",
+      "holderResidentId": "resident.hesta",
+      "factId": "fact.old_oath",
+      "confidence": 0.9199999999999999,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.7,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.jorin_herb_patch",
+      "holderResidentId": "resident.jorin",
+      "factId": "fact.herb_patch",
+      "confidence": 0.82,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.8,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.kara_mill_debt",
+      "holderResidentId": "resident.kara",
+      "factId": "fact.mill_debt",
+      "confidence": 0.87,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.5,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.leif_watch_fire",
+      "holderResidentId": "resident.leif",
+      "factId": "fact.watch_fire",
+      "confidence": 0.9199999999999999,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.6,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.mira_river_stones",
+      "holderResidentId": "resident.mira",
+      "factId": "fact.river_stones",
+      "confidence": 0.82,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.7,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.nolan_north_store",
+      "holderResidentId": "resident.nolan",
+      "factId": "fact.north_store",
+      "confidence": 0.87,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.8,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.orla_old_oath",
+      "holderResidentId": "resident.orla",
+      "factId": "fact.old_oath",
+      "confidence": 0.9199999999999999,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.5,
+      "willingnessToShare": 0.85
+    },
+    {
+      "version": 1,
+      "id": "belief.perrin_herb_patch",
+      "holderResidentId": "resident.perrin",
+      "factId": "fact.herb_patch",
+      "confidence": 0.82,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.6,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.rhea_mill_debt",
+      "holderResidentId": "resident.rhea",
+      "factId": "fact.mill_debt",
+      "confidence": 0.87,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.62,
+      "emotionalSignificance": 0.7,
+      "willingnessToShare": 0.65
+    },
+    {
+      "version": 1,
+      "id": "belief.tobin_watch_fire",
+      "holderResidentId": "resident.tobin",
+      "factId": "fact.watch_fire",
+      "confidence": 0.9199999999999999,
+      "bImportantSecret": false,
+      "sourceResidentId": "",
+      "secrecy": 0.15,
+      "emotionalSignificance": 0.8,
+      "willingnessToShare": 0.85
+    }
+  ],
+  "facts": [
+    {
+      "version": 1,
+      "id": "fact.river_stones",
+      "statement": "The river stepping stones remain passable after ordinary rain.",
+      "establishedDay": 0,
+      "bEstablished": true,
+      "bSecret": false
+    },
+    {
+      "version": 1,
+      "id": "fact.north_store",
+      "statement": "The north store keeps three sealed sacks of winter barley.",
+      "establishedDay": 0,
+      "bEstablished": true,
+      "bSecret": true
+    },
+    {
+      "version": 1,
+      "id": "fact.old_oath",
+      "statement": "The hall bell was cast from the frontier founders' broken tools.",
+      "establishedDay": 0,
+      "bEstablished": true,
+      "bSecret": false
+    },
+    {
+      "version": 1,
+      "id": "fact.herb_patch",
+      "statement": "Moonleaf grows behind Fern House and eases fever.",
+      "establishedDay": 0,
+      "bEstablished": true,
+      "bSecret": true
+    },
+    {
+      "version": 1,
+      "id": "fact.mill_debt",
+      "statement": "The mill owes two weeks of flour to the southern households.",
+      "establishedDay": 0,
+      "bEstablished": true,
+      "bSecret": true
+    },
+    {
+      "version": 1,
+      "id": "fact.watch_fire",
+      "statement": "A watch fire on the western ridge signals safe passage.",
+      "establishedDay": 0,
+      "bEstablished": true,
+      "bSecret": false
+    }
+  ],
+  "events": [],
+  "threats": [
+    {
+      "version": 1,
+      "id": "threat.mill_failure",
+      "threatType": "Threat.Infrastructure",
+      "premise": "The river mill's cracked drive wheel may fail before the lean season.",
+      "affectedLocationIds": ["location.river_mill", "location.granary"]
+    }
+  ],
+  "changeProjects": [
+    {
+      "version": 1,
+      "id": "project.emergency_workshop",
+      "initiatorResidentId": "resident.mara",
+      "targetLocationId": "location.commons_shed",
+      "desiredPurposeTag": "Purpose.Headquarters",
+      "reason": "Turn the empty commons shed into a restricted repair headquarters before the mill wheel fails.",
+      "requiredParticipantResidentIds": ["resident.mara", "resident.della"],
+      "requiredCapabilityTags": ["Capability.WorkSurface", "Capability.Counter", "Capability.Chair", "Capability.Door", "Capability.Interior"],
+      "requiredConditionTags": ["Condition.ThreatActive", "Condition.Overnight", "Condition.PlayerAway"],
+      "intendedStartMinute": 1200,
+      "requiredTransitionMinutes": 480,
+      "state": "Proposed"
+    }
+  ]
+}

@@ -1,0 +1,380 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://worldgen.local/schemas/world-director.schema.json",
+  "title": "World Director Canonical Types",
+  "$defs": {
+    "Version": { "type": "integer", "const": 1 },
+    "StableId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "MechanicalTag": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "(^|\\s)/(Game|Engine)/" }
+    },
+    "AccessPolicy": {
+      "type": "string",
+      "enum": ["Public", "Residents", "Workers", "Restricted", "Private"]
+    },
+    "ProjectState": {
+      "type": "string",
+      "enum": [
+        "Proposed", "Validated", "PermissionResolved", "Scheduled",
+        "Preparation", "Transition", "Active", "Delayed", "Refused", "Failed"
+      ]
+    },
+    "WorldBrief": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "id", "theme", "settlementIdentity", "playerPrompt", "premises", "terrainPreferences", "requiredCapabilityTags"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "theme": { "type": "string", "minLength": 1 },
+        "settlementIdentity": { "type": "string", "minLength": 1 },
+        "playerPrompt": { "type": "string" },
+        "premises": { "type": "array", "items": { "type": "string" } },
+        "terrainPreferences": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "requiredCapabilityTags": { "type": "array", "items": { "$ref": "#/$defs/MechanicalTag" }, "uniqueItems": true }
+      }
+    },
+    "TownTopologyEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fromLocationId", "toLocationId", "routeType"],
+      "properties": {
+        "fromLocationId": { "$ref": "#/$defs/StableId" },
+        "toLocationId": { "$ref": "#/$defs/StableId" },
+        "routeType": { "$ref": "#/$defs/MechanicalTag" }
+      }
+    },
+    "TownTopology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "id", "districts", "governance", "historicalWound", "currentTension", "supernaturalPremise", "centralThreat", "edges", "landmarkLocationIds"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "districts": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+        "governance": { "type": "string", "minLength": 1 },
+        "historicalWound": { "type": "string", "minLength": 1 },
+        "currentTension": { "type": "string", "minLength": 1 },
+        "supernaturalPremise": { "type": "string", "minLength": 1 },
+        "centralThreat": { "type": "string", "minLength": 1 },
+        "edges": { "type": "array", "items": { "$ref": "#/$defs/TownTopologyEdge" } },
+        "landmarkLocationIds": { "type": "array", "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true }
+      }
+    },
+    "WorldLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "id", "displayName", "purposeTag", "ownerResidentId",
+        "controllerResidentId", "accessPolicy", "residentCapacity",
+        "bRepurposable", "requiredCapabilityTags"
+      ],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "displayName": { "type": "string", "minLength": 1 },
+        "purposeTag": { "$ref": "#/$defs/MechanicalTag" },
+        "ownerResidentId": { "type": "string" },
+        "controllerResidentId": { "type": "string" },
+        "accessPolicy": { "$ref": "#/$defs/AccessPolicy" },
+        "residentCapacity": { "type": "integer", "minimum": 0 },
+        "bRepurposable": { "type": "boolean" },
+        "requiredCapabilityTags": { "type": "array", "items": { "$ref": "#/$defs/MechanicalTag" }, "uniqueItems": true }
+      }
+    },
+    "ResidentMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "factId", "summary", "day", "emotionalSignificance"],
+      "properties": {
+        "id": { "$ref": "#/$defs/StableId" },
+        "factId": { "$ref": "#/$defs/StableId" },
+        "summary": { "type": "string", "minLength": 1 },
+        "day": { "type": "integer", "minimum": 0 },
+        "emotionalSignificance": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "Resident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "id", "displayName", "homeLocationId", "workplaceLocationId",
+        "householdId", "occupationTag", "bEmployed", "beliefIds", "relationshipIds"
+      ],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "displayName": { "type": "string", "minLength": 1 },
+        "homeLocationId": { "$ref": "#/$defs/StableId" },
+        "workplaceLocationId": { "type": "string" },
+        "householdId": { "$ref": "#/$defs/StableId" },
+        "occupationTag": { "type": "string" },
+        "bEmployed": { "type": "boolean" },
+        "currentLocationId": { "type": "string" },
+        "motivation": { "type": "string" },
+        "fear": { "type": "string" },
+        "importantMemories": { "type": "array", "items": { "$ref": "#/$defs/ResidentMemory" } },
+        "availability": { "type": "string", "enum": ["Available", "Traveling", "Sleeping", "Working", "Socializing", "Waiting"] },
+        "beliefIds": { "type": "array", "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true },
+        "relationshipIds": { "type": "array", "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true }
+      }
+    },
+    "Household": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "id", "homeLocationId", "memberResidentIds"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "homeLocationId": { "$ref": "#/$defs/StableId" },
+        "memberResidentIds": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true }
+      }
+    },
+    "Relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "id", "sourceResidentId", "targetResidentId",
+        "relationshipType", "bBidirectional", "reciprocalRelationshipId"
+      ],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "sourceResidentId": { "$ref": "#/$defs/StableId" },
+        "targetResidentId": { "$ref": "#/$defs/StableId" },
+        "relationshipType": { "$ref": "#/$defs/MechanicalTag" },
+        "bBidirectional": { "type": "boolean" },
+        "reciprocalRelationshipId": { "type": "string" },
+        "trust": { "type": "number", "minimum": 0, "maximum": 1 },
+        "affinity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "fear": { "type": "number", "minimum": 0, "maximum": 1 },
+        "obligation": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "Belief": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "id", "holderResidentId", "factId", "confidence", "bImportantSecret"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "holderResidentId": { "$ref": "#/$defs/StableId" },
+        "factId": { "$ref": "#/$defs/StableId" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "bImportantSecret": { "type": "boolean" },
+        "sourceResidentId": { "type": "string" },
+        "secrecy": { "type": "number", "minimum": 0, "maximum": 1 },
+        "emotionalSignificance": { "type": "number", "minimum": 0, "maximum": 1 },
+        "willingnessToShare": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "WorldFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "id", "statement", "establishedDay", "bEstablished", "bSecret"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "statement": { "type": "string", "minLength": 1 },
+        "establishedDay": { "type": "integer", "minimum": 0 },
+        "bEstablished": { "type": "boolean" },
+        "bSecret": { "type": "boolean" }
+      }
+    },
+    "WorldEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "id", "day", "summary", "participantResidentIds", "locationIds", "revealedFactIds"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "day": { "type": "integer", "minimum": 0 },
+        "summary": { "type": "string", "minLength": 1 },
+        "participantResidentIds": { "type": "array", "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true },
+        "locationIds": { "type": "array", "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true },
+        "revealedFactIds": { "type": "array", "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true }
+      }
+    },
+    "Threat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "id", "threatType", "premise", "affectedLocationIds"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "threatType": { "$ref": "#/$defs/MechanicalTag" },
+        "premise": { "type": "string", "minLength": 1 },
+        "affectedLocationIds": { "type": "array", "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true }
+      }
+    },
+    "ChangeProject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "id", "initiatorResidentId", "targetLocationId",
+        "desiredPurposeTag", "reason", "requiredParticipantResidentIds",
+        "requiredCapabilityTags", "requiredConditionTags", "intendedStartMinute",
+        "requiredTransitionMinutes", "state"
+      ],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "initiatorResidentId": { "$ref": "#/$defs/StableId" },
+        "targetLocationId": { "$ref": "#/$defs/StableId" },
+        "desiredPurposeTag": { "$ref": "#/$defs/MechanicalTag" },
+        "reason": { "type": "string", "minLength": 1 },
+        "requiredParticipantResidentIds": { "type": "array", "items": { "$ref": "#/$defs/StableId" }, "uniqueItems": true },
+        "requiredCapabilityTags": { "type": "array", "items": { "$ref": "#/$defs/MechanicalTag" }, "uniqueItems": true },
+        "requiredConditionTags": { "type": "array", "items": { "$ref": "#/$defs/MechanicalTag" }, "uniqueItems": true },
+        "intendedStartMinute": { "type": "integer", "minimum": 0 },
+        "requiredTransitionMinutes": { "type": "integer", "minimum": 60, "maximum": 1440 },
+        "state": { "$ref": "#/$defs/ProjectState" }
+      }
+    },
+    "GeneratedWorldSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "id", "seed", "brief", "topology", "locations", "residents",
+        "households", "relationships", "beliefs", "facts", "events", "threats", "changeProjects"
+      ],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "seed": { "type": "integer" },
+        "brief": { "$ref": "#/$defs/WorldBrief" },
+        "topology": { "$ref": "#/$defs/TownTopology" },
+        "locations": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/WorldLocation" } },
+        "residents": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Resident" } },
+        "households": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/Household" } },
+        "relationships": { "type": "array", "items": { "$ref": "#/$defs/Relationship" } },
+        "beliefs": { "type": "array", "items": { "$ref": "#/$defs/Belief" } },
+        "facts": { "type": "array", "items": { "$ref": "#/$defs/WorldFact" } },
+        "events": { "type": "array", "items": { "$ref": "#/$defs/WorldEvent" } },
+        "threats": { "type": "array", "items": { "$ref": "#/$defs/Threat" } },
+        "changeProjects": { "type": "array", "items": { "$ref": "#/$defs/ChangeProject" } }
+      }
+    },
+    "Vector": {
+      "type": "object",
+      "required": ["x", "y", "z"],
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" } }
+    },
+    "Vector2D": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+    },
+    "Quaternion": {
+      "type": "object",
+      "required": ["x", "y", "z", "w"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" },
+        "w": { "type": "number" }
+      }
+    },
+    "Transform": {
+      "type": "object",
+      "required": ["rotation", "translation", "scale3D"],
+      "properties": {
+        "rotation": { "$ref": "#/$defs/Quaternion" },
+        "translation": { "$ref": "#/$defs/Vector" },
+        "scale3D": { "$ref": "#/$defs/Vector" }
+      }
+    },
+    "ResolvedLocationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["locationId", "shellAsset", "interiorAsset", "transform", "entranceTransform", "footprintSize", "bRepurposable"],
+      "properties": {
+        "locationId": { "$ref": "#/$defs/StableId" },
+        "shellAsset": { "type": "string", "minLength": 1 },
+        "interiorAsset": { "type": "string", "minLength": 1 },
+        "transform": { "$ref": "#/$defs/Transform" },
+        "entranceTransform": { "$ref": "#/$defs/Transform" },
+        "footprintSize": { "$ref": "#/$defs/Vector2D" },
+        "bRepurposable": { "type": "boolean" }
+      }
+    },
+    "ScheduleStop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hour", "locationId"],
+      "properties": {
+        "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+        "locationId": { "$ref": "#/$defs/StableId" }
+      }
+    },
+    "ResolvedResidentPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["residentId", "homeLocationId", "workplaceLocationId", "skeletalMeshAsset", "modularPartAssets", "idleAnimationAsset", "spawnTransform", "schedule"],
+      "properties": {
+        "residentId": { "$ref": "#/$defs/StableId" },
+        "homeLocationId": { "$ref": "#/$defs/StableId" },
+        "workplaceLocationId": { "$ref": "#/$defs/StableId" },
+        "skeletalMeshAsset": { "type": "string", "minLength": 1 },
+        "modularPartAssets": { "type": "array", "minItems": 3, "items": { "type": "string", "minLength": 1 } },
+        "idleAnimationAsset": { "type": "string", "minLength": 1 },
+        "spawnTransform": { "$ref": "#/$defs/Transform" },
+        "schedule": { "type": "array", "items": { "$ref": "#/$defs/ScheduleStop" } }
+      }
+    },
+    "ResolvedRoutePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fromLocationId", "toLocationId", "routeType", "transform"],
+      "properties": {
+        "fromLocationId": { "$ref": "#/$defs/StableId" },
+        "toLocationId": { "$ref": "#/$defs/StableId" },
+        "routeType": { "type": "string", "minLength": 1 },
+        "transform": { "$ref": "#/$defs/Transform" }
+      }
+    },
+    "ResolvedWorldPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "id", "sourceSpecId", "seed", "terrainMap", "landmarkLocationId", "locations", "residents", "routes"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "id": { "$ref": "#/$defs/StableId" },
+        "sourceSpecId": { "$ref": "#/$defs/StableId" },
+        "seed": { "type": "integer" },
+        "terrainMap": { "type": "string", "minLength": 1 },
+        "landmarkLocationId": { "$ref": "#/$defs/StableId" },
+        "locations": { "type": "array", "items": { "$ref": "#/$defs/ResolvedLocationPlan" } },
+        "residents": { "type": "array", "items": { "$ref": "#/$defs/ResolvedResidentPlan" } },
+        "routes": { "type": "array", "items": { "$ref": "#/$defs/ResolvedRoutePlan" } }
+      }
+    },
+    "ValidationIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "path", "message"],
+      "properties": {
+        "severity": { "type": "string", "enum": ["Error", "Warning"] },
+        "code": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ValidationReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "bValid", "issues"],
+      "properties": {
+        "version": { "$ref": "#/$defs/Version" },
+        "bValid": { "type": "boolean" },
+        "issues": { "type": "array", "items": { "$ref": "#/$defs/ValidationIssue" } }
+      }
+    }
+  }
+}

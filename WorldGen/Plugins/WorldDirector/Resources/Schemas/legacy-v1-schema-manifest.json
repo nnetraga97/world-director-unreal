@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "authority": "The strict reflected C++ reader is authoritative where historical documentation schemas differ.",
+  "frozenFiles": {
+    "Belief.schema.json": "44779835b5e27d551a2fb22a8f9b56d2a3ab030c2a30acb48223f50c4d2042a8",
+    "ChangeProject.schema.json": "d8fc0d4ea37126df203b7822d571bdd15c1032f80530121cb08c12017b25d955",
+    "GeneratedWorldSpec.schema.json": "513c8a57f7d63fc3d952c52696ba00568c34825910c03580a45e3cab2f8e298d",
+    "Household.schema.json": "4d8f08a685c48abdb9cfd989470e99a3c4dfc0a0317ad8975b3417f2e46094e3",
+    "Relationship.schema.json": "d8ba025b9102b0e4cd7c717706bc08289f304c33afb81816a4205c66782bed09",
+    "Resident.schema.json": "fe2a671b152e1c519aa667f98094e500b950d212c57b70e38fe9466a6973af74",
+    "ResolvedWorldPlan.schema.json": "d62bb0c4e4c8cf09b21bd273680bdfcea714fa71eb7a5dac3cace7f8febdcb8f",
+    "Threat.schema.json": "5b97d1ef871cf265aa6ac12a3973eb164d15d39c3514d7984b8d962eb647fb57",
+    "TownTopology.schema.json": "c93d100fc1bd12ad06f5fb1ccaab83e6782bb1c1aa0756ad08c4aafe6729101b",
+    "ValidationReport.schema.json": "3314e7034f7778204c803c9b133986249ffdea9b06b19f7bdbfd9a39c0fd3cbc",
+    "WorldBrief.schema.json": "b1d82c929efeeccdaabfd29877ab946772b509a5e03c4f023228aa7bb370d063",
+    "WorldEvent.schema.json": "d0413f770be33b8db2302fc30331cf1f32eb0c4c8633d8409e47d5a15ffcd8ff",
+    "WorldFact.schema.json": "8dc53141ed30e46ecc20502e77e85bf367b4d000ff53225538104f1a6469f178",
+    "world-director.schema.json": "a094ee137122769bf93ab3f6194a75eb8614a683c011e49ab5352dbe9fe0d897"
+  }
+}

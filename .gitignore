@@ -1,0 +1,46 @@
+# Unreal generated directories
+WorldGen/Binaries/
+WorldGen/Build/
+!WorldGen/Build/
+WorldGen/Build/*
+!WorldGen/Build/Mac/
+WorldGen/Build/Mac/*
+!WorldGen/Build/Mac/Resources/
+WorldGen/Build/Mac/Resources/*
+!WorldGen/Build/Mac/Resources/WorldGen.Unsandboxed.entitlements
+WorldGen/DerivedDataCache/
+WorldGen/Intermediate/
+WorldGen/Saved/
+WorldGen/Plugins/*/Binaries/
+WorldGen/Plugins/*/Intermediate/
+
+# IDE and platform files
+.DS_Store
+**/.DS_Store
+*.xcworkspace
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+.vscode/
+.idea/
+
+# Local agent/editor state
+WorldGen/.cursor/
+WorldGen/.gemini/
+WorldGen/.codex/
+WorldGen/.mcp.json
+
+# Raw source downloads are reproducible inputs, not shipped Unreal content
+*.zip
+*.rar
+*.7z
+
+# Locally installed Fab / marketplace content. Keep these assets in the Unreal
+# project, but do not redistribute them through this source repository.
+WorldGen/Content/Fantastic_Village_Pack/
+WorldGen/Content/Construction_VOL1/
+WorldGen/Content/Fishermans_Cabin/
+WorldGen/Content/Modular_Rural_Cabin/
+WorldGen/Content/OldWest/
+WorldGen/Content/SciFITrooper_Man_03/
+WorldGen/Content/__ExternalActors__/Fishermans_Cabin/
+WorldGen/Content/__ExternalObjects__/Fishermans_Cabin/

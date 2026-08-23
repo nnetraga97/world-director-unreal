@@ -1,0 +1,212 @@
+{
+  "version": 1,
+  "id": "world.brackenford",
+  "seed": 481516,
+  "brief": {
+    "version": 1,
+    "id": "brief.brackenford",
+    "theme": "Stylized Medieval Frontier",
+    "settlementIdentity": "Brackenford, a river-road guild settlement",
+    "playerPrompt": "A small frontier town divided over the old guildhall.",
+    "premises": [
+      "The river road sustains the settlement.",
+      "A recent fever makes spare beds politically important."
+    ],
+    "terrainPreferences": ["Flat river basin", "Elevated civic shelf"],
+    "requiredCapabilityTags": [
+      "Capability.Interior",
+      "Capability.Character.Modular"
+    ]
+  },
+  "topology": {
+    "version": 1,
+    "id": "topology.brackenford",
+    "districts": ["River Road", "Guild Rise"],
+    "governance": "A reeve arbitrates between households and the old guild.",
+    "historicalWound": "The guildhall closed after a fever divided the town.",
+    "currentTension": "Residents disagree over using the guildhall as a clinic.",
+    "supernaturalPremise": "Old river bells are said to sound before sickness.",
+    "centralThreat": "A returning fever may overwhelm the town's spare beds.",
+    "edges": [
+      {
+        "fromLocationId": "location.arden_home",
+        "toLocationId": "location.guildhall",
+        "routeType": "Path"
+      },
+      {
+        "fromLocationId": "location.guildhall",
+        "toLocationId": "location.arden_home",
+        "routeType": "Path"
+      }
+    ],
+    "landmarkLocationIds": ["location.guildhall"]
+  },
+  "locations": [
+    {
+      "version": 1,
+      "id": "location.arden_home",
+      "displayName": "Arden House",
+      "purposeTag": "Purpose.Home",
+      "ownerResidentId": "resident.mara",
+      "controllerResidentId": "",
+      "accessPolicy": "Residents",
+      "residentCapacity": 2,
+      "bRepurposable": true,
+      "requiredCapabilityTags": [
+        "Capability.Bed",
+        "Capability.Door",
+        "Capability.Interior"
+      ]
+    },
+    {
+      "version": 1,
+      "id": "location.guildhall",
+      "displayName": "Old Guildhall",
+      "purposeTag": "Purpose.Workplace",
+      "ownerResidentId": "",
+      "controllerResidentId": "resident.oren",
+      "accessPolicy": "Public",
+      "residentCapacity": 8,
+      "bRepurposable": true,
+      "requiredCapabilityTags": [
+        "Capability.Counter",
+        "Capability.WorkSurface",
+        "Capability.Chair",
+        "Capability.Door",
+        "Capability.Landmark"
+      ]
+    }
+  ],
+  "residents": [
+    {
+      "version": 1,
+      "id": "resident.mara",
+      "displayName": "Mara Arden",
+      "homeLocationId": "location.arden_home",
+      "workplaceLocationId": "location.guildhall",
+      "householdId": "household.arden",
+      "occupationTag": "Occupation.Merchant",
+      "bEmployed": true,
+      "currentLocationId": "location.arden_home",
+      "motivation": "Protect neighbors from the fever.",
+      "fear": "The secret will spread before beds are ready.",
+      "importantMemories": [],
+      "availability": "Available",
+      "beliefIds": ["belief.mara_fever"],
+      "relationshipIds": ["relationship.mara_oren"]
+    },
+    {
+      "version": 1,
+      "id": "resident.oren",
+      "displayName": "Oren Vale",
+      "homeLocationId": "location.arden_home",
+      "workplaceLocationId": "location.guildhall",
+      "householdId": "household.arden",
+      "occupationTag": "Occupation.Reeve",
+      "bEmployed": true,
+      "currentLocationId": "location.arden_home",
+      "motivation": "Keep the town council functional.",
+      "fear": "The fever will divide the households.",
+      "importantMemories": [],
+      "availability": "Available",
+      "beliefIds": [],
+      "relationshipIds": ["relationship.oren_mara"]
+    }
+  ],
+  "households": [
+    {
+      "version": 1,
+      "id": "household.arden",
+      "homeLocationId": "location.arden_home",
+      "memberResidentIds": ["resident.mara", "resident.oren"]
+    }
+  ],
+  "relationships": [
+    {
+      "version": 1,
+      "id": "relationship.mara_oren",
+      "sourceResidentId": "resident.mara",
+      "targetResidentId": "resident.oren",
+      "relationshipType": "Family.Spouse",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.oren_mara",
+      "trust": 0.8,
+      "affinity": 0.8,
+      "fear": 0.05,
+      "obligation": 0.6
+    },
+    {
+      "version": 1,
+      "id": "relationship.oren_mara",
+      "sourceResidentId": "resident.oren",
+      "targetResidentId": "resident.mara",
+      "relationshipType": "Family.Spouse",
+      "bBidirectional": true,
+      "reciprocalRelationshipId": "relationship.mara_oren",
+      "trust": 0.8,
+      "affinity": 0.8,
+      "fear": 0.05,
+      "obligation": 0.6
+    }
+  ],
+  "beliefs": [
+    {
+      "version": 1,
+      "id": "belief.mara_fever",
+      "holderResidentId": "resident.mara",
+      "factId": "fact.fever_case",
+      "confidence": 1.0,
+      "bImportantSecret": true,
+      "sourceResidentId": "",
+      "secrecy": 0.75,
+      "emotionalSignificance": 0.9,
+      "willingnessToShare": 0.7
+    }
+  ],
+  "facts": [
+    {
+      "version": 1,
+      "id": "fact.fever_case",
+      "statement": "A traveler with fever was sheltered before the town meeting.",
+      "establishedDay": 0,
+      "bEstablished": true,
+      "bSecret": true
+    }
+  ],
+  "events": [
+    {
+      "version": 1,
+      "id": "event.first_meeting",
+      "day": 1,
+      "summary": "Mara privately tells Oren about the sick traveler.",
+      "participantResidentIds": ["resident.mara", "resident.oren"],
+      "locationIds": ["location.arden_home"],
+      "revealedFactIds": ["fact.fever_case"]
+    }
+  ],
+  "threats": [
+    {
+      "version": 1,
+      "id": "threat.fever",
+      "threatType": "Threat.Illness",
+      "premise": "The settlement may need a temporary clinic.",
+      "affectedLocationIds": ["location.arden_home", "location.guildhall"]
+    }
+  ],
+  "changeProjects": [
+    {
+      "version": 1,
+      "id": "project.temporary_clinic",
+      "initiatorResidentId": "resident.mara",
+      "targetLocationId": "location.arden_home",
+      "desiredPurposeTag": "Purpose.Clinic",
+      "reason": "Prepare spare beds before the fever spreads.",
+      "requiredParticipantResidentIds": ["resident.mara", "resident.oren"],
+      "requiredCapabilityTags": ["Capability.Bed", "Capability.WorkSurface"],
+      "requiredConditionTags": ["Condition.Overnight", "Condition.PlayerAway"],
+      "intendedStartMinute": 1200,
+      "requiredTransitionMinutes": 480,
+      "state": "Proposed"
+    }
+  ]
+}

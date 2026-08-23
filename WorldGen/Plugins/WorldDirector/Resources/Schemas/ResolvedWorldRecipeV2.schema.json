@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://worldgen.local/schemas/ResolvedWorldRecipeV2.schema.json",
+  "title": "Replayable World Director Physical Recipe V2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "id", "sourceSpecId", "seed", "generatorVersion", "contentVersion",
+    "environmentProfile", "stageSeeds", "terrain", "districtAnchors", "landmarkLocationId",
+    "locations", "residents", "routes", "dressing", "layoutFingerprint", "routeFingerprint",
+    "dressingFingerprint", "worldFingerprint"
+  ],
+  "properties": {
+    "version": {"const": 2},
+    "id": {"type": "string", "minLength": 1},
+    "sourceSpecId": {"type": "string", "minLength": 1},
+    "seed": {"type": "integer"},
+    "terrainMap": {"type": "object", "description": "Legacy compatibility field; empty in generated V2 recipes."},
+    "generatorVersion": {"type": "string", "minLength": 1},
+    "contentVersion": {"type": "string", "minLength": 1},
+    "environmentProfile": {"type": "string", "const": "Profile.StylizedVillage"},
+    "stageSeeds": {"type": "object", "additionalProperties": {"type": "integer"}},
+    "terrain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archetype", "resolution", "extentCentimeters", "heightsCentimeters", "surfaceTypes", "waterControlPoints", "waterLevelCentimeters", "minimumHeightCentimeters", "maximumHeightCentimeters", "meanSlopeDegrees", "heightFingerprint", "surfaceFingerprint"],
+      "properties": {
+        "archetype": {"enum": ["Basin", "Valley", "Ridge", "Coast", "Marsh"]},
+        "resolution": {"type": "integer", "minimum": 2},
+        "extentCentimeters": {"type": "integer", "minimum": 1000},
+        "heightsCentimeters": {"type": "array", "items": {"type": "integer"}, "minItems": 4},
+        "surfaceTypes": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 5}, "minItems": 4},
+        "waterControlPoints": {"type": "array"},
+        "waterLevelCentimeters": {"type": "integer"},
+        "minimumHeightCentimeters": {"type": "number"},
+        "maximumHeightCentimeters": {"type": "number"},
+        "meanSlopeDegrees": {"type": "number", "minimum": 0},
+        "heightFingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "surfaceFingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "districtAnchors": {"type": "array", "minItems": 2},
+    "landmarkLocationId": {"type": "string", "minLength": 1},
+    "locations": {"type": "array", "minItems": 6, "maxItems": 18},
+    "residents": {"type": "array"},
+    "routes": {"type": "array", "minItems": 1},
+    "dressing": {"type": "array"},
+    "layoutFingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "routeFingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dressingFingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "worldFingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
