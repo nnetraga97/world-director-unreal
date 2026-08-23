@@ -7,6 +7,13 @@
 
 namespace
 {
+// 193 samples over the 1.2 km domain = 625 cm terrain cells. At player-eye height
+// that is a ~6 m flat facet underfoot, and it quantises every feature authored
+// below that size (the 900 cm plot skirts and 720 cm road shoulders are ~1.4
+// cells). Raising this to 385 is the single highest-impact terrain change, but it
+// perturbs the tuned A* route solutions: seed 71011 then violates the existing
+// post-smoothing plot-clearance invariant, so route refinement must be retuned in
+// the same change. Left at 193 until that work is done.
 constexpr int32 TerrainResolution = 193;
 constexpr int32 TerrainExtent = 60000;
 constexpr int32 TerrainDiameter = TerrainExtent * 2;
@@ -399,7 +406,18 @@ void ApplyThermalErosion(FWorldDirectorTerrainRecipe& Terrain, const int32 Passe
 	}
 	TArray<float> Delta;
 	Delta.Init(0.0f, Working.Num());
-	const float TalusCentimeters = 390.0f;
+	// Talus must be expressed as a slope angle, not a fixed height step: a literal
+	// 390 cm was ~32 degrees on the old 625 cm grid but would silently become ~51
+	// degrees on a finer one, weakening erosion exactly when resolution improved.
+	// Derive it from the actual cell size so the repose angle stays put.
+	const float CellCentimeters = static_cast<float>(Terrain.ExtentCentimeters * 2) /
+		static_cast<float>(Terrain.Resolution - 1);
+	// Expressed against the 625 cm cell the value was originally tuned for, so this
+	// is bit-identical today and still correct if the grid is ever refined.
+	constexpr float TunedTalusCentimeters = 390.0f;
+	constexpr float TunedCellCentimeters = 625.0f;
+	const float TalusCentimeters =
+		TunedTalusCentimeters * (CellCentimeters / TunedCellCentimeters);
 	for (int32 Pass = 0; Pass < Passes; ++Pass)
 	{
 		Delta.Init(0.0f, Working.Num());
@@ -1015,7 +1033,59 @@ TArray<FVector2D> FindTerrainRoute(
 				TEXT("WORLD_DIRECTOR_ROUTE_GRID_FALLBACK start=(%.0f,%.0f) end=(%.0f,%.0f) occupied=%d"),
 				Start.X, Start.Y, End.X, End.Y, Occupied.Num());
 		}
-		Path = {Start, FMath::Lerp(Start, End, 0.33f), FMath::Lerp(Start, End, 0.66f), End};
+		// A straight chord here ignored the blocking plots entirely, so a failed grid
+		// search silently emitted a route straight through somebody's house. Try a
+		// widening perpendicular detour first and only fall back to the chord when
+		// nothing clears, so the degenerate case is rare and logged rather than normal.
+		auto ChordClearsPlots = [&Occupied](const TArray<FVector2D>& Candidate)
+		{
+			for (int32 Index = 1; Index < Candidate.Num(); ++Index)
+			{
+				for (int32 BoxIndex = 0; BoxIndex < Occupied.Num(); ++BoxIndex)
+				{
+					if (SegmentIntersectsBox2D(
+						Candidate[Index - 1], Candidate[Index], Occupied[BoxIndex]))
+					{
+						return false;
+					}
+				}
+			}
+			return true;
+		};
+		TArray<FVector2D> Chosen = {
+			Start, FMath::Lerp(Start, End, 0.33f), FMath::Lerp(Start, End, 0.66f), End};
+		if (!ChordClearsPlots(Chosen))
+		{
+			const FVector2D Axis = (End - Start).GetSafeNormal();
+			const FVector2D Side(-Axis.Y, Axis.X);
+			const float Span = FVector2D::Distance(Start, End);
+			bool bResolved = false;
+			for (int32 Step = 1; Step <= 8 && !bResolved; ++Step)
+			{
+				const float Offset = Span * 0.18f * Step;
+				for (int32 Direction = 0; Direction < 2 && !bResolved; ++Direction)
+				{
+					const FVector2D Push = Side * (Direction == 0 ? Offset : -Offset);
+					TArray<FVector2D> Detour = {
+						Start,
+						FMath::Lerp(Start, End, 0.33f) + Push,
+						FMath::Lerp(Start, End, 0.66f) + Push,
+						End};
+					if (ChordClearsPlots(Detour))
+					{
+						Chosen = MoveTemp(Detour);
+						bResolved = true;
+					}
+				}
+			}
+			if (!bResolved)
+			{
+				UE_LOG(LogWorldDirector, Warning,
+					TEXT("WORLD_DIRECTOR_ROUTE_DETOUR_EXHAUSTED start=(%.0f,%.0f) end=(%.0f,%.0f)"),
+					Start.X, Start.Y, End.X, End.Y);
+			}
+		}
+		Path = MoveTemp(Chosen);
 	}
 	const TArray<FVector2D> SafeGridPath = Path;
 	auto DistanceToSafeGridPath = [&](const FVector2D& Position)

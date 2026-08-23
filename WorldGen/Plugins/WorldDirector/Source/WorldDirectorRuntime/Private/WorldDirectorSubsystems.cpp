@@ -1330,8 +1330,29 @@ FString ValidationSection(const FString& Path)
 {
 	FString Section = Path;
 	Section.RemoveFromStart(TEXT("$."));
+	// Take the EARLIEST delimiter, not the first one that happens to be found.
+	// Short-circuiting on '[' turned "topology.edges[0].fromLocationId" into the
+	// dotted string "topology.edges", which callers then wrote back as a
+	// top-level document key -- poisoning the document with a field the strict
+	// reader rejects forever, so every later repair attempt failed too.
+	int32 BracketIndex = INDEX_NONE;
+	int32 DotIndex = INDEX_NONE;
+	const bool bHasBracket = Section.FindChar(TEXT('['), BracketIndex);
+	const bool bHasDot = Section.FindChar(TEXT('.'), DotIndex);
 	int32 End = INDEX_NONE;
-	if (Section.FindChar(TEXT('['), End) || Section.FindChar(TEXT('.'), End))
+	if (bHasBracket && bHasDot)
+	{
+		End = FMath::Min(BracketIndex, DotIndex);
+	}
+	else if (bHasBracket)
+	{
+		End = BracketIndex;
+	}
+	else if (bHasDot)
+	{
+		End = DotIndex;
+	}
+	if (End != INDEX_NONE)
 	{
 		Section.LeftInline(End);
 	}
