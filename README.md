@@ -120,10 +120,28 @@ rebuilt from the already-installed certified textures by running
 `UnrealEditor-Cmd`; the script does not download or generate artwork.
 
 For deterministic visual review, add `-WorldDirectorVisualCapture` and one of
-`-WorldDirectorVisualView=overview|approach|landmark|civic|topdown` when launching
-`L_WorldDirectorTown`. Add `-WorldDirectorVisualOutput=/absolute/path.png` to
-choose the screenshot destination. This path always uses the local fixture and
+`-WorldDirectorVisualView=overview|approach|landmark|civic|topdown|eye|street|district|overlook`
+when launching `L_WorldDirectorTown`. Add `-WorldDirectorVisualOutput=/absolute/path.png`
+to choose the screenshot destination. This path always uses the local fixture and
 does not invoke the configured model.
+
+`-RenderOffScreen` is **required** on macOS. Without it the Metal backend writes a
+well-formed but completely black PNG (an `AGX ... Region height OOB` assertion
+appears on stderr). The harness now decodes the frame it wrote and fails with
+`reason=blank_frame` rather than reporting success for an empty image, so a missing
+`-RenderOffScreen` shows up as a capture failure instead of a passing black frame.
+
+The first five views are elevated (3.6 m to 300 m up). `eye`, `street`, `district`
+and `overlook` line-trace the collision surface and stand the camera 170 cm above
+it, which is the only way ground-level terrain and composition defects are visible.
+
+```sh
+"/Users/Shared/Epic Games/UE_5.8/Engine/Binaries/Mac/UnrealEditor-Cmd" \
+  "$PWD/WorldGen/WorldGen.uproject" /Game/WorldDirector/Maps/L_WorldDirectorTown \
+  -game -unattended -nop4 -nosplash -nomcp -RenderOffScreen -ResX=1600 -ResY=900 \
+  -WorldDirectorVisualCapture -WorldDirectorVisualView=street \
+  -WorldDirectorVisualOutput=/absolute/path.png
+```
 
 Real model generation is never required for build or fixture verification. Configure and invoke it only deliberately; generated diagnostics are written beneath `WorldGen/Saved/WorldRuns/` and remain local.
 

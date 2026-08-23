@@ -33,6 +33,8 @@
 #include "SmartObjectComponent.h"
 #include "StateTree.h"
 #include "Interfaces/IPluginManager.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/CommandLine.h"
@@ -3564,6 +3566,108 @@ void AWorldDirectorFixtureBootstrap::RunAutomatedVisualCapture()
 			FVector(0.0f, 0.0f, bCivicComposition ? 1850.0f : 360.0f);
 		FieldOfView = bCivicComposition ? 58.0f : 52.0f;
 	}
+	else if (AutomatedVisualCaptureView == TEXT("eye") ||
+		AutomatedVisualCaptureView == TEXT("street") ||
+		AutomatedVisualCaptureView == TEXT("district") ||
+		AutomatedVisualCaptureView == TEXT("overlook"))
+	{
+		// Every pre-existing view sits between 3.6 m and 300 m up, which is exactly
+		// the altitude band where a 625 cm terrain cell, top-down planar UVs and
+		// one-vertex grading skirts all still look acceptable. These views stand a
+		// notional player on the actual collision surface instead, so ground-level
+		// defects are visible to review rather than hidden by altitude.
+		const float EyeHeightCentimeters = 170.0f;
+		auto GroundAt = [this, World](const FVector2D& Where, const float Fallback) -> float
+		{
+			FHitResult Hit;
+			const FVector TraceStart(Where.X, Where.Y, 60000.0f);
+			const FVector TraceEnd(Where.X, Where.Y, -30000.0f);
+			FCollisionQueryParams Params(SCENE_QUERY_STAT(WorldDirectorVisualGround), false);
+			if (World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_WorldStatic, Params))
+			{
+				return Hit.ImpactPoint.Z;
+			}
+			return Fallback;
+		};
+
+		const FVector2D SettlementCentre(SettlementFocus.X, SettlementFocus.Y);
+		const float CentreFallback = SettlementFocus.Z - 700.0f;
+		FVector2D StandAt = SettlementCentre;
+		FVector LookAt = LandmarkFocus;
+
+		if (AutomatedVisualCaptureView == TEXT("street"))
+		{
+			// Stand on the civic approach itself, looking back up it at the landmark.
+			const FVector2D Entrance(LandmarkEntrance.X, LandmarkEntrance.Y);
+			StandAt = FMath::Lerp(Entrance, SettlementCentre, 0.55f);
+			LookAt = LandmarkEntrance;
+		}
+		else if (AutomatedVisualCaptureView == TEXT("district"))
+		{
+			// The location furthest from the landmark stands in for a secondary
+			// district, so the shot is not another view of the civic core.
+			float FurthestDistance = -1.0f;
+			FVector2D Furthest = SettlementCentre;
+			for (const AWorldDirectorLocationActor* Location : CompiledTown->SpawnedLocations)
+			{
+				if (Location == nullptr || Location->LocationId == CompiledTown->LandmarkLocationId)
+				{
+					continue;
+				}
+				const FVector Position = Location->GetActorLocation();
+				const float Distance = FVector2D::Distance(
+					FVector2D(Position.X, Position.Y), FVector2D(LandmarkFocus.X, LandmarkFocus.Y));
+				if (Distance > FurthestDistance)
+				{
+					FurthestDistance = Distance;
+					Furthest = FVector2D(Position.X, Position.Y);
+				}
+			}
+			// Step back off the plot so the building is framed rather than clipped.
+			const FVector2D Inward = (SettlementCentre - Furthest).GetSafeNormal();
+			StandAt = Furthest + Inward * 2600.0f;
+			LookAt = FVector(Furthest.X, Furthest.Y,
+				GroundAt(Furthest, CentreFallback) + 400.0f);
+		}
+		else if (AutomatedVisualCaptureView == TEXT("overlook"))
+		{
+			// Search a ring around the settlement for genuinely high ground, so the
+			// shot reports whatever relief actually exists near the town.
+			float BestHeight = -TNumericLimits<float>::Max();
+			FVector2D BestPosition = SettlementCentre;
+			const float SearchRadius = FMath::Max(18000.0f, SettlementSpan * 0.85f);
+			for (int32 RingIndex = 0; RingIndex < 3; ++RingIndex)
+			{
+				const float Radius = SearchRadius * (0.55f + 0.225f * RingIndex);
+				for (int32 Step = 0; Step < 24; ++Step)
+				{
+					const float Angle = (2.0f * PI * Step) / 24.0f;
+					const FVector2D Candidate = SettlementCentre +
+						FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * Radius;
+					const float Height = GroundAt(Candidate, -TNumericLimits<float>::Max());
+					if (Height > BestHeight)
+					{
+						BestHeight = Height;
+						BestPosition = Candidate;
+					}
+				}
+			}
+			StandAt = BestPosition;
+			LookAt = FVector(SettlementCentre.X, SettlementCentre.Y, CentreFallback + 600.0f);
+		}
+
+		const float StandGround = GroundAt(StandAt, CentreFallback);
+		CameraLocation = FVector(StandAt.X, StandAt.Y, StandGround + EyeHeightCentimeters);
+		if (AutomatedVisualCaptureView == TEXT("eye"))
+		{
+			LookAt.Z = FMath::Max(LookAt.Z, CameraLocation.Z);
+		}
+		CameraTarget = LookAt;
+		FieldOfView = 75.0f;
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_VISUAL_EYE view=%s groundZ=%.0f eyeZ=%.0f"),
+			*AutomatedVisualCaptureView, StandGround, CameraLocation.Z);
+	}
 	else if (AutomatedVisualCaptureView == TEXT("topdown"))
 	{
 		CameraTarget = SettlementFocus;
@@ -3668,18 +3772,85 @@ void AWorldDirectorFixtureBootstrap::FinishAutomatedVisualCapture()
 {
 	const int64 ScreenshotBytes = AutomatedVisualCapturePath.IsEmpty()
 		? INDEX_NONE : IFileManager::Get().FileSize(*AutomatedVisualCapturePath);
-	const bool bPassed = ScreenshotBytes > 1024;
+
+	// A screenshot that exists is not a screenshot that rendered. Offscreen and
+	// headless Metal paths can emit a perfectly well-formed, perfectly black PNG,
+	// so decode the frame back and require actual tonal variation before passing.
+	// Without this the harness reports success for an empty image.
+	float FrameMean = 0.0f;
+	float FrameStdDev = 0.0f;
+	int32 FrameMin = 0;
+	int32 FrameMax = 0;
+	bool bFrameDecoded = false;
+	if (ScreenshotBytes > 1024)
+	{
+		TArray<uint8> FileBytes;
+		if (FFileHelper::LoadFileToArray(FileBytes, *AutomatedVisualCapturePath))
+		{
+			IImageWrapperModule& ImageWrapperModule =
+				FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
+			const TSharedPtr<IImageWrapper> ImageWrapper =
+				ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+			TArray<uint8> Raw;
+			if (ImageWrapper.IsValid() &&
+				ImageWrapper->SetCompressed(FileBytes.GetData(), FileBytes.Num()) &&
+				ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, Raw) && Raw.Num() >= 4)
+			{
+				const int64 PixelCount = Raw.Num() / 4;
+				// Sample at most ~200k pixels; full decode of a 4K frame is wasteful here.
+				const int64 Stride = FMath::Max<int64>(1, PixelCount / 200000);
+				double Sum = 0.0;
+				double SumSquares = 0.0;
+				int64 Samples = 0;
+				int32 MinLuma = 255;
+				int32 MaxLuma = 0;
+				for (int64 Pixel = 0; Pixel < PixelCount; Pixel += Stride)
+				{
+					const uint8 B = Raw[Pixel * 4 + 0];
+					const uint8 G = Raw[Pixel * 4 + 1];
+					const uint8 R = Raw[Pixel * 4 + 2];
+					const int32 Luma = (R * 299 + G * 587 + B * 114) / 1000;
+					Sum += Luma;
+					SumSquares += static_cast<double>(Luma) * Luma;
+					MinLuma = FMath::Min(MinLuma, Luma);
+					MaxLuma = FMath::Max(MaxLuma, Luma);
+					++Samples;
+				}
+				if (Samples > 0)
+				{
+					const double Mean = Sum / Samples;
+					FrameMean = static_cast<float>(Mean);
+					FrameStdDev = static_cast<float>(
+						FMath::Sqrt(FMath::Max(0.0, SumSquares / Samples - Mean * Mean)));
+					FrameMin = MinLuma;
+					FrameMax = MaxLuma;
+					bFrameDecoded = true;
+				}
+			}
+		}
+	}
+
+	const bool bHasContent = bFrameDecoded &&
+		(FrameMax - FrameMin) >= 8 && FrameStdDev >= 4.0f;
+	const bool bPassed = ScreenshotBytes > 1024 && bHasContent;
 	if (bPassed)
 	{
 		UE_LOG(LogWorldDirector, Display,
-			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=PASS view=%s bytes=%lld path=%s"),
-			*AutomatedVisualCaptureView, ScreenshotBytes, *AutomatedVisualCapturePath);
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=PASS view=%s bytes=%lld ")
+			TEXT("mean=%.1f stdev=%.1f min=%d max=%d path=%s"),
+			*AutomatedVisualCaptureView, ScreenshotBytes,
+			FrameMean, FrameStdDev, FrameMin, FrameMax, *AutomatedVisualCapturePath);
 	}
 	else
 	{
+		const TCHAR* Reason = ScreenshotBytes <= 1024
+			? TEXT("missing_or_truncated")
+			: (!bFrameDecoded ? TEXT("decode_failed") : TEXT("blank_frame"));
 		UE_LOG(LogWorldDirector, Error,
-			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=FAIL view=%s bytes=%lld path=%s"),
-			*AutomatedVisualCaptureView, ScreenshotBytes, *AutomatedVisualCapturePath);
+			TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_RESULT=FAIL reason=%s view=%s bytes=%lld ")
+			TEXT("mean=%.1f stdev=%.1f min=%d max=%d path=%s"),
+			Reason, *AutomatedVisualCaptureView, ScreenshotBytes,
+			FrameMean, FrameStdDev, FrameMin, FrameMax, *AutomatedVisualCapturePath);
 	}
 	FGenericPlatformMisc::RequestExitWithStatus(false, bPassed ? 0 : 5);
 }

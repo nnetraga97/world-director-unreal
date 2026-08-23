@@ -25,7 +25,8 @@ public class WorldDirectorRuntime : ModuleRules
 			"UMG",
 			"Slate",
 			"SlateCore",
-			"ApplicationCore"
+			"ApplicationCore",
+			"ImageWrapper"
 			,"ProceduralMeshComponent",
 			"Landscape"
 			,"PlatformCrypto",
