@@ -1358,6 +1358,186 @@ FString ValidationSection(const FString& Path)
 	}
 	return Section;
 }
+
+template <typename T>
+bool ValidateJsonObjectAsStruct(
+	const TSharedPtr<FJsonObject>& Object,
+	const FString& Path,
+	FString& OutError)
+{
+	if (!Object.IsValid())
+	{
+		OutError = FString::Printf(TEXT("%s must be a JSON object."), *Path);
+		return false;
+	}
+	T Value;
+	FText FailureReason;
+	if (!FJsonObjectConverter::JsonObjectToUStruct(
+			Object.ToSharedRef(), T::StaticStruct(), &Value, 0, 0, true, &FailureReason))
+	{
+		OutError = FString::Printf(
+			TEXT("%s does not match its strict canonical type: %s"),
+			*Path, *FailureReason.ToString().Left(512));
+		return false;
+	}
+	return true;
+}
+
+bool ValidateStageObject(
+	const FString& Section,
+	const TSharedPtr<FJsonObject>& Object,
+	const FString& Path,
+	FString& OutError)
+{
+	if (Section == TEXT("brief"))
+	{
+		return ValidateJsonObjectAsStruct<FWorldBrief>(Object, Path, OutError);
+	}
+	if (Section == TEXT("topology"))
+	{
+		return ValidateJsonObjectAsStruct<FTownTopology>(Object, Path, OutError);
+	}
+	if (Section == TEXT("locations"))
+	{
+		return ValidateJsonObjectAsStruct<FWorldLocation>(Object, Path, OutError);
+	}
+	if (Section == TEXT("residents"))
+	{
+		return ValidateJsonObjectAsStruct<FResident>(Object, Path, OutError);
+	}
+	if (Section == TEXT("households"))
+	{
+		return ValidateJsonObjectAsStruct<FHousehold>(Object, Path, OutError);
+	}
+	if (Section == TEXT("relationships"))
+	{
+		return ValidateJsonObjectAsStruct<FRelationship>(Object, Path, OutError);
+	}
+	if (Section == TEXT("beliefs"))
+	{
+		return ValidateJsonObjectAsStruct<FBelief>(Object, Path, OutError);
+	}
+	if (Section == TEXT("facts"))
+	{
+		return ValidateJsonObjectAsStruct<FWorldFact>(Object, Path, OutError);
+	}
+	if (Section == TEXT("events"))
+	{
+		return ValidateJsonObjectAsStruct<FWorldEvent>(Object, Path, OutError);
+	}
+	if (Section == TEXT("threats"))
+	{
+		return ValidateJsonObjectAsStruct<FThreat>(Object, Path, OutError);
+	}
+	if (Section == TEXT("changeProjects"))
+	{
+		return ValidateJsonObjectAsStruct<FChangeProject>(Object, Path, OutError);
+	}
+	OutError = FString::Printf(TEXT("Unknown canonical generation section '%s'."), *Section);
+	return false;
+}
+
+bool ValidateStageArray(
+	const FString& Section,
+	const TArray<TSharedPtr<FJsonValue>>& Values,
+	const FString& Path,
+	FString& OutError)
+{
+	for (int32 Index = 0; Index < Values.Num(); ++Index)
+	{
+		const TSharedPtr<FJsonObject> Object = Values[Index].IsValid()
+			? Values[Index]->AsObject() : nullptr;
+		if (!ValidateStageObject(
+				Section, Object, FString::Printf(TEXT("%s[%d]"), *Path, Index), OutError))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool TryGetTopLevelArrayIndex(
+	const FString& Path,
+	const FString& Section,
+	int32& OutIndex)
+{
+	const FString Prefix = TEXT("$.") + Section + TEXT("[");
+	if (!Path.StartsWith(Prefix))
+	{
+		return false;
+	}
+	const int32 ClosingBracket = Path.Find(TEXT("]"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Prefix.Len());
+	if (ClosingBracket == INDEX_NONE)
+	{
+		return false;
+	}
+	const FString Number = Path.Mid(Prefix.Len(), ClosingBracket - Prefix.Len());
+	if (Number.IsEmpty() || !Number.IsNumeric())
+	{
+		return false;
+	}
+	OutIndex = FCString::Atoi(*Number);
+	return OutIndex >= 0;
+}
+
+bool EnsureAuthoritativeThreatFact(
+	const TSharedRef<FJsonObject>& WorkingDocument,
+	FString& OutError)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Facts = nullptr;
+	if (!WorkingDocument->TryGetArrayField(TEXT("facts"), Facts) || Facts == nullptr)
+	{
+		OutError = TEXT("Topology stage did not provide a facts array.");
+		return false;
+	}
+	if (!Facts->IsEmpty())
+	{
+		return true;
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* Threats = nullptr;
+	if (!WorkingDocument->TryGetArrayField(TEXT("threats"), Threats) ||
+		Threats == nullptr || Threats->IsEmpty() || !(*Threats)[0].IsValid())
+	{
+		OutError = TEXT("Cannot seed an authoritative fact without a central threat.");
+		return false;
+	}
+	const TSharedPtr<FJsonObject> Threat = (*Threats)[0]->AsObject();
+	if (!Threat.IsValid())
+	{
+		OutError = TEXT("Topology central threat is not a JSON object.");
+		return false;
+	}
+
+	FString Statement;
+	Threat->TryGetStringField(TEXT("premise"), Statement);
+	if (Statement.IsEmpty())
+	{
+		const TSharedPtr<FJsonObject>* Topology = nullptr;
+		if (WorkingDocument->TryGetObjectField(TEXT("topology"), Topology) &&
+			Topology != nullptr && Topology->IsValid())
+		{
+			(*Topology)->TryGetStringField(TEXT("centralThreat"), Statement);
+		}
+	}
+	if (Statement.IsEmpty())
+	{
+		Statement = TEXT("The settlement faces its central threat.");
+	}
+
+	const TSharedRef<FJsonObject> Fact = MakeShared<FJsonObject>();
+	Fact->SetNumberField(TEXT("version"), 1);
+	Fact->SetStringField(TEXT("id"), TEXT("fact.central_threat"));
+	Fact->SetStringField(TEXT("statement"), Statement);
+	Fact->SetNumberField(TEXT("establishedDay"), 0);
+	Fact->SetBoolField(TEXT("bEstablished"), true);
+	Fact->SetBoolField(TEXT("bSecret"), false);
+
+	TArray<TSharedPtr<FJsonValue>> UpdatedFacts = *Facts;
+	UpdatedFacts.Add(MakeShared<FJsonValueObject>(Fact));
+	WorkingDocument->SetArrayField(TEXT("facts"), UpdatedFacts);
+	return true;
+}
 }
 
 void UDirectorBridgeSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -1417,9 +1597,12 @@ bool UDirectorBridgeSubsystem::BeginWorldGeneration(
 
 	GenerationPlayerPrompt = PlayerPrompt;
 	GenerationModel = bUseFixtureProviderForTesting
-		? TEXT("deterministic fixture") : Model.TrimStartAndEnd();
+		? TEXT("deterministic fixture")
+		: (Model.TrimStartAndEnd().IsEmpty() ? TEXT("gpt-5.6-luna") : Model.TrimStartAndEnd());
 	GenerationReasoningEffort = bUseFixtureProviderForTesting
-		? TEXT("n/a") : ReasoningEffort.TrimStartAndEnd().ToLower();
+		? TEXT("n/a")
+		: (ReasoningEffort.TrimStartAndEnd().IsEmpty()
+			? TEXT("high") : ReasoningEffort.TrimStartAndEnd().ToLower());
 	GenerationSeed = Seed;
 	GenerationStageTimeoutSeconds = FMath::Max(1.0f, StageTimeoutSeconds);
 	bFixtureProviderForTesting = bUseFixtureProviderForTesting;
@@ -1427,6 +1610,8 @@ bool UDirectorBridgeSubsystem::BeginWorldGeneration(
 	ConsecutiveRepairIssueCount = 0;
 	LastRepairIssueSignature.Reset();
 	LastGenerationError.Reset();
+	RuntimeCompileState = TEXT("NotAttempted");
+	RuntimeCompileError.Reset();
 	GeneratedWorldSpec = FGeneratedWorldSpec();
 	LastResolvedWorldPlan = FResolvedWorldPlan();
 	LastGenerationValidation = FValidationReport();
@@ -1570,7 +1755,176 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	Request->SetNumberField(TEXT("attempt"), RepairAttempt);
 	Request->SetStringField(
 		TEXT("providerMode"), bFixtureProviderForTesting ? TEXT("fixture") : TEXT("cli"));
-	Request->SetObjectField(TEXT("current"), WorkingGenerationDocument);
+
+	// Later stages do not need the entire mutable document. In particular, repair
+	// requests must not resend every resident, relationship, and memory when only
+	// one indexed entry is invalid. Keep the persisted request bounded and make
+	// the repair target contract explicit.
+	const TSharedRef<FJsonObject> StageCurrent = MakeShared<FJsonObject>();
+	for (const TCHAR* Field : {TEXT("id"), TEXT("seed")})
+	{
+		if (const TSharedPtr<FJsonValue>* Value = WorkingGenerationDocument->Values.Find(Field))
+		{
+			StageCurrent->SetField(Field, *Value);
+		}
+	}
+	const auto CopyCurrentObject = [&](const TCHAR* Field)
+	{
+		const TSharedPtr<FJsonObject>* Object = nullptr;
+		if (WorkingGenerationDocument->TryGetObjectField(Field, Object) &&
+			Object != nullptr && Object->IsValid())
+		{
+			StageCurrent->SetObjectField(Field, *Object);
+		}
+	};
+	const auto CopyCurrentArray = [&](const TCHAR* Field)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (WorkingGenerationDocument->TryGetArrayField(Field, Values) && Values != nullptr)
+		{
+			StageCurrent->SetArrayField(Field, *Values);
+		}
+	};
+	if (StageName == TEXT("topology") || StageName == TEXT("population"))
+	{
+		CopyCurrentObject(TEXT("brief"));
+	}
+	if (StageName == TEXT("population"))
+	{
+		CopyCurrentObject(TEXT("topology"));
+		for (const TCHAR* Field : {TEXT("locations"), TEXT("facts"), TEXT("threats")})
+		{
+			CopyCurrentArray(Field);
+		}
+	}
+	if (StageName == TEXT("repair"))
+	{
+		bool bRepairNeedsBeliefs = false;
+		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+		{
+			const FString IssueCode = Issue.Code.ToString();
+			const FString Section = ValidationSection(Issue.Path);
+			if (IssueCode == TEXT("slice.resident_social_state") ||
+				(Section == TEXT("residents") && Issue.Path.Contains(TEXT(".beliefIds"))))
+			{
+				bRepairNeedsBeliefs = true;
+				break;
+			}
+		}
+		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+		{
+			const FString Section = ValidationSection(Issue.Path);
+			if (Section.IsEmpty() || Section == TEXT("$"))
+			{
+				continue;
+			}
+			int32 Index = INDEX_NONE;
+			if (TryGetTopLevelArrayIndex(Issue.Path, Section, Index))
+			{
+				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+				if (WorkingGenerationDocument->TryGetArrayField(Section, Values) &&
+					Values != nullptr && Values->IsValidIndex(Index))
+				{
+					const TSharedPtr<FJsonObject> Entry = (*Values)[Index].IsValid()
+						? (*Values)[Index]->AsObject() : nullptr;
+					if (Entry.IsValid())
+					{
+						const TSharedPtr<FJsonObject>* Existing =
+							nullptr;
+						if (!StageCurrent->TryGetObjectField(Section, Existing) ||
+							Existing == nullptr || !Existing->IsValid())
+						{
+							StageCurrent->SetObjectField(Section, MakeShared<FJsonObject>());
+							StageCurrent->TryGetObjectField(Section, Existing);
+						}
+						if (Existing != nullptr && Existing->IsValid())
+						{
+							(*Existing)->SetObjectField(FString::FromInt(Index), Entry);
+						}
+					}
+				}
+			}
+			else
+			{
+				CopyCurrentObject(*Section);
+			}
+		}
+		if (bRepairNeedsBeliefs)
+		{
+			CopyCurrentArray(TEXT("beliefs"));
+			CopyCurrentArray(TEXT("facts"));
+		}
+	}
+	Request->SetObjectField(TEXT("current"), StageCurrent);
+
+	TArray<TSharedPtr<FJsonValue>> RepairTargetValues;
+	if (StageName == TEXT("repair"))
+	{
+		TSet<FString> SeenTargets;
+		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+		{
+			const FString Section = ValidationSection(Issue.Path);
+			if (Section.IsEmpty() || Section == TEXT("$"))
+			{
+				continue;
+			}
+			int32 Index = INDEX_NONE;
+			const bool bHasIndex = TryGetTopLevelArrayIndex(Issue.Path, Section, Index);
+			const FString TargetKey = Section + TEXT("|") +
+				(bHasIndex ? FString::FromInt(Index) : TEXT("*"));
+			TSharedPtr<FJsonObject> Target;
+			if (SeenTargets.Contains(TargetKey))
+			{
+				continue;
+			}
+			SeenTargets.Add(TargetKey);
+			Target = MakeShared<FJsonObject>();
+			Target->SetStringField(TEXT("section"), Section);
+			if (bHasIndex)
+			{
+				Target->SetNumberField(TEXT("index"), Index);
+				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+				if (WorkingGenerationDocument->TryGetArrayField(Section, Values) &&
+					Values != nullptr && Values->IsValidIndex(Index))
+				{
+					FString Id;
+					const TSharedPtr<FJsonObject> Entry = (*Values)[Index].IsValid()
+						? (*Values)[Index]->AsObject() : nullptr;
+					if (Entry.IsValid() && Entry->TryGetStringField(TEXT("id"), Id))
+					{
+						Target->SetStringField(TEXT("id"), Id);
+					}
+				}
+			}
+			TArray<TSharedPtr<FJsonValue>> IssueCodes;
+			IssueCodes.Add(MakeShared<FJsonValueString>(Issue.Code.ToString()));
+			Target->SetArrayField(TEXT("issueCodes"), IssueCodes);
+			RepairTargetValues.Add(MakeShared<FJsonValueObject>(Target.ToSharedRef()));
+		}
+		bool bRepairNeedsBeliefs = false;
+		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+		{
+			const FString IssueCode = Issue.Code.ToString();
+			const FString Section = ValidationSection(Issue.Path);
+			if (IssueCode == TEXT("slice.resident_social_state") ||
+				(Section == TEXT("residents") && Issue.Path.Contains(TEXT(".beliefIds"))))
+			{
+				bRepairNeedsBeliefs = true;
+				break;
+			}
+		}
+		if (bRepairNeedsBeliefs && !SeenTargets.Contains(TEXT("beliefs|*")))
+		{
+			TSharedPtr<FJsonObject> BeliefsTarget = MakeShared<FJsonObject>();
+			BeliefsTarget->SetStringField(TEXT("section"), TEXT("beliefs"));
+			TArray<TSharedPtr<FJsonValue>> IssueCodes;
+			IssueCodes.Add(MakeShared<FJsonValueString>(TEXT("slice.resident_social_state")));
+			BeliefsTarget->SetArrayField(TEXT("issueCodes"), IssueCodes);
+			RepairTargetValues.Add(MakeShared<FJsonValueObject>(BeliefsTarget.ToSharedRef()));
+			SeenTargets.Add(TEXT("beliefs|*"));
+		}
+	}
+	Request->SetArrayField(TEXT("repairTargets"), RepairTargetValues);
 
 	const TSharedRef<FJsonObject> CapabilitySummary = MakeShared<FJsonObject>();
 	CapabilitySummary->SetStringField(TEXT("theme"), TEXT("Asset-led stylized village and rural frontier"));
@@ -1715,10 +2069,21 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	{
 		Request->SetNumberField(TEXT("testDelaySeconds"), FMath::Max(0.0, CompanionTestDelay));
 	}
+	Request->SetNumberField(
+		TEXT("companionTimeoutSeconds"),
+		FMath::Max(1.0, static_cast<double>(GenerationStageTimeoutSeconds) - 5.0));
 
 	if (!SaveJsonObject(Request, RequestPath))
 	{
 		FinishGeneration(false, TEXT("Could not persist the stage request."));
+		return;
+	}
+	const int64 RequestBytes = IFileManager::Get().FileSize(*RequestPath);
+	if (RequestBytes > 32000)
+	{
+		FinishGeneration(false, FString::Printf(
+			TEXT("Stage request exceeded the 32000-byte local CLI budget (%lld bytes)."),
+			RequestBytes));
 		return;
 	}
 	FWorldDirectorGenerationStageMetric& Metric = GenerationMetrics.AddDefaulted_GetRef();
@@ -1740,7 +2105,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	Metric.Model = GenerationModel.IsEmpty() ? TEXT("CLI default (not reported)") : GenerationModel;
 	Metric.ReasoningEffort = GenerationReasoningEffort.IsEmpty()
 		? TEXT("CLI default") : GenerationReasoningEffort;
-	Metric.RequestBytes = IFileManager::Get().FileSize(*RequestPath);
+	Metric.RequestBytes = RequestBytes;
 	CurrentMetricIndex = GenerationMetrics.Num() - 1;
 	CurrentStageStartedAtSeconds = FPlatformTime::Seconds();
 	RecordGenerationLog(FString::Printf(TEXT("Stage %s requested; requestBytes=%lld timeout=%.1fs"),
@@ -1822,6 +2187,12 @@ void UDirectorBridgeSubsystem::HandleStageResponse(
 			Metric.PromptCharacters = static_cast<int64>(Number);
 		}
 	};
+	if (Response.bSuccess &&
+		FTCHARToUTF8(*Response.ResponseJson).Length() > 64000)
+	{
+		Response.bSuccess = false;
+		Response.Error = TEXT("Companion response exceeded the 64000-byte local CLI budget.");
+	}
 	const int32 CompletedMetricIndex = CurrentMetricIndex;
 	if (GenerationMetrics.IsValidIndex(CompletedMetricIndex))
 	{
@@ -1900,8 +2271,21 @@ void UDirectorBridgeSubsystem::HandleStageResponse(
 			FinishGeneration(false, CandidateError);
 			return;
 		}
+		// Layout candidates are already deterministic Unreal-authored artifacts.
+		// Selecting one locally removes a redundant AI call and prevents the model
+		// from spending tokens choosing an opaque ID it cannot improve.
+		const int32 CandidateIndex = FMath::Abs(GenerationSeed) % LayoutCandidates.Num();
+		SelectedLayoutCandidateId = LayoutCandidates[CandidateIndex].OpaqueId;
+		WorkingGenerationDocument->SetNumberField(
+			TEXT("seed"), LayoutCandidates[CandidateIndex].LayoutSeed);
 		GenerationStage = EWorldDirectorGenerationStage::Layout;
+		GenerationStageHistory.Add(StageWireName());
+		GenerationStage = EWorldDirectorGenerationStage::Population;
+		RecordGenerationLog(FString::Printf(
+			TEXT("Layout selected locally; candidate=%s seed=%d"),
+			*SelectedLayoutCandidateId, LayoutCandidates[CandidateIndex].LayoutSeed));
 		RequestCurrentStage();
+		return;
 	}
 	else if (GenerationStage == EWorldDirectorGenerationStage::Layout)
 	{
@@ -1993,6 +2377,10 @@ bool UDirectorBridgeSubsystem::ApplyStagePayload(
 			OutError = TEXT("Interpret stage did not return a world brief.");
 			return false;
 		}
+		if (!ValidateStageObject(TEXT("brief"), *Brief, TEXT("$.brief"), OutError))
+		{
+			return false;
+		}
 		WorkingGenerationDocument->SetObjectField(TEXT("brief"), *Brief);
 		return true;
 	}
@@ -2004,7 +2392,10 @@ bool UDirectorBridgeSubsystem::ApplyStagePayload(
 			OutError = TEXT("Topology stage did not return semantic topology.");
 			return false;
 		}
-		WorkingGenerationDocument->SetObjectField(TEXT("topology"), *Topology);
+		if (!ValidateStageObject(TEXT("topology"), *Topology, TEXT("$.topology"), OutError))
+		{
+			return false;
+		}
 		for (const TCHAR* Field : { TEXT("locations"), TEXT("facts"), TEXT("threats") })
 		{
 			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
@@ -2013,7 +2404,21 @@ bool UDirectorBridgeSubsystem::ApplyStagePayload(
 				OutError = FString::Printf(TEXT("Topology stage omitted '%s'."), Field);
 				return false;
 			}
+			if (!ValidateStageArray(Field, *Values, FString(TEXT("$.") + FString(Field)), OutError))
+			{
+				return false;
+			}
+		}
+		WorkingGenerationDocument->SetObjectField(TEXT("topology"), *Topology);
+		for (const TCHAR* Field : { TEXT("locations"), TEXT("facts"), TEXT("threats") })
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+			Payload->TryGetArrayField(Field, Values);
 			WorkingGenerationDocument->SetArrayField(Field, *Values);
+		}
+		if (!EnsureAuthoritativeThreatFact(WorkingGenerationDocument.ToSharedRef(), OutError))
+		{
+			return false;
 		}
 		return true;
 	}
@@ -2047,6 +2452,17 @@ bool UDirectorBridgeSubsystem::ApplyStagePayload(
 				OutError = FString::Printf(TEXT("Population stage omitted '%s'."), Field);
 				return false;
 			}
+			if (!ValidateStageArray(Field, *Values, FString(TEXT("$.") + FString(Field)), OutError))
+			{
+				return false;
+			}
+		}
+		for (const TCHAR* Field : {
+			TEXT("residents"), TEXT("households"), TEXT("relationships"),
+			TEXT("beliefs"), TEXT("events"), TEXT("changeProjects") })
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+			Payload->TryGetArrayField(Field, Values);
 			WorkingGenerationDocument->SetArrayField(Field, *Values);
 		}
 		return true;
@@ -2102,14 +2518,14 @@ bool UDirectorBridgeSubsystem::IntegrateAndValidate()
 			LastGenerationValidation.Issues.Num(), RepairAttempt + 1));
 		GenerationIssueHistory.Append(LastGenerationValidation.Issues);
 		SaveValidationReport();
-		if (++RepairAttempt <= 3)
+		if (++RepairAttempt <= 2)
 		{
 			GenerationStage = EWorldDirectorGenerationStage::Repair;
 			RequestCurrentStage();
 			return false;
 		}
 		FinishGeneration(false,
-			TEXT("Integrated world remained invalid after three targeted repair attempts."));
+			TEXT("Integrated world remained invalid after two targeted repair attempts."));
 		return false;
 	}
 
@@ -2221,36 +2637,39 @@ bool UDirectorBridgeSubsystem::ApplyTargetedRepairs(
 	FString& OutError)
 {
 	const TArray<TSharedPtr<FJsonValue>>* Replacements = nullptr;
-	if (!Payload.IsValid() ||
+	if (!Payload.IsValid() || !WorkingGenerationDocument.IsValid() ||
 		!Payload->TryGetArrayField(TEXT("replacements"), Replacements) || Replacements == nullptr)
 	{
 		OutError = TEXT("Repair stage did not return targeted replacements.");
 		return false;
 	}
-	// A whole-document parse or shape failure reports path "$", which resolves to the
-	// section "$" -- a name no replacement can ever legally target. The repair round
-	// trip was therefore guaranteed to be rejected ("Repair attempted to modify a
-	// section not named by validation") no matter how good the model's answer was.
-	// When the failure is document-wide, every top-level section is fair game.
 	TSet<FString> AllowedSections;
-	bool bDocumentWideFailure = false;
+	TSet<FString> ExpectedTargets;
 	for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
 	{
 		const FString Section = ValidationSection(Issue.Path);
-		if (Section.IsEmpty() || Section == TEXT("$"))
+		if (!Section.IsEmpty() && Section != TEXT("$"))
 		{
-			bDocumentWideFailure = true;
-			continue;
+			AllowedSections.Add(Section);
+			int32 Index = INDEX_NONE;
+			const bool bHasIndex = TryGetTopLevelArrayIndex(Issue.Path, Section, Index);
+			ExpectedTargets.Add(Section + TEXT("|") +
+				(bHasIndex ? FString::FromInt(Index) : TEXT("*")));
+			if (Issue.Code.ToString() == TEXT("slice.resident_social_state") ||
+				(Section == TEXT("residents") && Issue.Path.Contains(TEXT(".beliefIds"))))
+			{
+				AllowedSections.Add(TEXT("beliefs"));
+				ExpectedTargets.Add(TEXT("beliefs|*"));
+			}
 		}
-		AllowedSections.Add(Section);
 	}
-	if (bDocumentWideFailure && WorkingGenerationDocument.IsValid())
+	if (AllowedSections.IsEmpty())
 	{
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : WorkingGenerationDocument->Values)
-		{
-			AllowedSections.Add(Field.Key);
-		}
+		OutError = TEXT(
+			"Repair cannot target a document-wide shape failure; the generating stage must be retried.");
+		return false;
 	}
+	TSet<FString> AppliedTargets;
 	for (const TSharedPtr<FJsonValue>& ReplacementValue : *Replacements)
 	{
 		const TSharedPtr<FJsonObject> Replacement = ReplacementValue.IsValid()
@@ -2266,18 +2685,69 @@ bool UDirectorBridgeSubsystem::ApplyTargetedRepairs(
 			!Value.IsValid() ||
 			!AllowedSections.Contains(Section))
 		{
-			OutError = TEXT("Repair attempted to modify a section not named by validation.");
+			OutError = TEXT("Repair attempted to modify a section not named by validation targets.");
 			return false;
 		}
-		if (!bHasIndex)
+		FString TargetKey = Section + TEXT("|");
+		if (bHasIndex)
 		{
-			if (Value->Type != EJson::Array)
+			if (!FMath::IsFinite(IndexNumber) ||
+				!FMath::IsNearlyEqual(
+					IndexNumber, static_cast<double>(FMath::RoundToInt(IndexNumber))) ||
+				IndexNumber < 0.0)
 			{
-				OutError = TEXT("Whole-section repair value must be an array.");
+				OutError = TEXT("Repair replacement index is not a nonnegative integer array index.");
 				return false;
 			}
-			WorkingGenerationDocument->SetArrayField(Section, Value->AsArray());
+			TargetKey += FString::FromInt(static_cast<int32>(IndexNumber));
+		}
+		else
+		{
+			TargetKey += TEXT("*");
+		}
+		if (!ExpectedTargets.Contains(TargetKey))
+		{
+			OutError = FString::Printf(
+				TEXT("Repair returned an unexpected target '%s'."), *TargetKey);
+			return false;
+		}
+		if (AppliedTargets.Contains(TargetKey))
+		{
+			OutError = FString::Printf(
+				TEXT("Repair returned duplicate target '%s'."), *TargetKey);
+			return false;
+		}
+		AppliedTargets.Add(TargetKey);
+		const bool bArraySection = Section != TEXT("brief") && Section != TEXT("topology");
+		if (!bHasIndex)
+		{
+			if (bArraySection)
+			{
+				if (Value->Type != EJson::Array ||
+					!ValidateStageArray(Section, Value->AsArray(), TEXT("$."), OutError))
+				{
+					OutError = OutError.IsEmpty()
+						? FString::Printf(TEXT("Whole-section repair for '%s' must be a strict array."), *Section)
+						: OutError;
+					return false;
+				}
+				WorkingGenerationDocument->SetArrayField(Section, Value->AsArray());
+			}
+			else
+			{
+				const TSharedPtr<FJsonObject> Object = Value->AsObject();
+				if (!ValidateStageObject(Section, Object, TEXT("$."), OutError))
+				{
+					return false;
+				}
+				WorkingGenerationDocument->SetObjectField(Section, Object);
+			}
 			continue;
+		}
+		if (!bArraySection)
+		{
+			OutError = TEXT("Repair replacement index is not a nonnegative integer array index.");
+			return false;
 		}
 		const int32 Index = static_cast<int32>(IndexNumber);
 		const TArray<TSharedPtr<FJsonValue>>* Existing = nullptr;
@@ -2287,9 +2757,31 @@ bool UDirectorBridgeSubsystem::ApplyTargetedRepairs(
 			OutError = TEXT("Repair replacement path does not identify an existing array entry.");
 			return false;
 		}
+		const TSharedPtr<FJsonObject> Object = Value->AsObject();
+		if (!ValidateStageObject(
+				Section, Object, FString::Printf(TEXT("$.%s[%d]"), *Section, Index), OutError))
+		{
+			return false;
+		}
 		TArray<TSharedPtr<FJsonValue>> Updated = *Existing;
 		Updated[Index] = Value;
 		WorkingGenerationDocument->SetArrayField(Section, Updated);
+	}
+	if (AppliedTargets.Num() != ExpectedTargets.Num())
+	{
+		TArray<FString> MissingTargets;
+		for (const FString& ExpectedTarget : ExpectedTargets)
+		{
+			if (!AppliedTargets.Contains(ExpectedTarget))
+			{
+				MissingTargets.Add(ExpectedTarget);
+			}
+		}
+		MissingTargets.Sort();
+		OutError = FString::Printf(
+			TEXT("Repair omitted %d targeted replacement(s): %s."),
+			MissingTargets.Num(), *FString::Join(MissingTargets, TEXT(", ")));
+		return false;
 	}
 	return true;
 }
@@ -2350,6 +2842,8 @@ void UDirectorBridgeSubsystem::RecordRuntimeCompilationMetric(
 	const bool bSuccess, const double DurationSeconds, const int32 LocationCount,
 	const int32 ResidentCount, const FString& Error)
 {
+	RuntimeCompileState = bSuccess ? TEXT("Succeeded") : TEXT("Failed");
+	RuntimeCompileError = bSuccess ? FString() : Error;
 	FWorldDirectorGenerationStageMetric& Metric = GenerationMetrics.AddDefaulted_GetRef();
 	Metric.Stage = TEXT("unreal-compile");
 	Metric.StartedAtUtc =
@@ -2471,6 +2965,17 @@ void UDirectorBridgeSubsystem::SaveRunSummary() const
 		TEXT("unavailable: Codex CLI does not report a monetary charge"));
 	Summary->SetStringField(TEXT("state"),
 		StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(static_cast<int64>(GenerationStage)));
+	const FString Outcome = RuntimeCompileState == TEXT("Failed")
+		? TEXT("FailedRuntimeCompile")
+		: RuntimeCompileState == TEXT("Succeeded")
+			? TEXT("Completed")
+			: GenerationStage == EWorldDirectorGenerationStage::Completed
+				? TEXT("CompletedSemanticOnly")
+				: StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(
+					static_cast<int64>(GenerationStage));
+	Summary->SetStringField(TEXT("outcome"), Outcome);
+	Summary->SetStringField(TEXT("runtimeCompileState"), RuntimeCompileState);
+	Summary->SetStringField(TEXT("runtimeCompileError"), RuntimeCompileError);
 	Summary->SetNumberField(TEXT("seed"), GenerationSeed);
 	Summary->SetNumberField(TEXT("promptCharacters"), GenerationPlayerPrompt.Len());
 	Summary->SetNumberField(TEXT("elapsedSeconds"), GetGenerationElapsedSeconds());

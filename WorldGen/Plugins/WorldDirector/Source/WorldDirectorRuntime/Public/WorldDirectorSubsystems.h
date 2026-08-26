@@ -452,6 +452,12 @@ private:
 	FString LastGenerationError;
 
 	UPROPERTY()
+	FString RuntimeCompileState = TEXT("NotAttempted");
+
+	UPROPERTY()
+	FString RuntimeCompileError;
+
+	UPROPERTY()
 	FGeneratedWorldSpec GeneratedWorldSpec;
 
 	UPROPERTY()

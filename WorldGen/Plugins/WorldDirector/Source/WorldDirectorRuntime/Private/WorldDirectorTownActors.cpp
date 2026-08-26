@@ -47,6 +47,9 @@
 #include "UnrealClient.h"
 #include "WorldDirectorDialogueWidget.h"
 #include "WorldDirectorCreateWorldWidget.h"
+#include "WorldDirectorLandingWidget.h"
+#include "WorldDirectorLoadingWidget.h"
+#include "WorldDirectorMapWidget.h"
 #include "WorldDirectorGenerationDiagnosticsWidget.h"
 #include "WorldDirectorInspectionWidget.h"
 #include "WorldDirectorJson.h"
@@ -56,6 +59,24 @@
 
 namespace
 {
+FString WorldDirectorRunsDirectory()
+{
+	return FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("WorldRuns")));
+}
+
+bool IsWorldDirectorRecipePath(const FString& Path)
+{
+	const FString NormalizedPath = FPaths::ConvertRelativePathToFull(Path);
+	FString RunsPrefix = WorldDirectorRunsDirectory();
+	if (!RunsPrefix.EndsWith(TEXT("/")))
+	{
+		RunsPrefix += TEXT("/");
+	}
+	return FPaths::GetCleanFilename(NormalizedPath) == TEXT("06-resolved-world-v3.json") &&
+		NormalizedPath.StartsWith(RunsPrefix, ESearchCase::IgnoreCase);
+}
+
 void RefreshWorldDirectorPlayerInput(UWorld* World)
 {
 	if (World == nullptr)
@@ -1649,6 +1670,7 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 	FValidationReport& OutReport)
 {
 	OutReport = FValidationReport();
+	CompiledPlan = Plan;
 	SourceSpecId = Plan.SourceSpecId;
 	LandmarkLocationId = Plan.LandmarkLocationId;
 	WorldFingerprint = Plan.WorldFingerprint;
@@ -2312,6 +2334,7 @@ AWorldDirectorFixtureBootstrap::AWorldDirectorFixtureBootstrap()
 void AWorldDirectorFixtureBootstrap::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorldTimerManager().ClearTimer(CreationMenuRetryHandle);
+	GetWorldTimerManager().ClearTimer(SampleWorldCompileHandle);
 	if (UDirectorBridgeSubsystem* Bridge = GetGameInstance()
 		? GetGameInstance()->GetSubsystem<UDirectorBridgeSubsystem>() : nullptr)
 	{
@@ -2323,6 +2346,18 @@ void AWorldDirectorFixtureBootstrap::EndPlay(const EEndPlayReason::Type EndPlayR
 	if (CreateWorldWidget != nullptr)
 	{
 		CreateWorldWidget->RemoveFromParent();
+	}
+	if (LandingWidget != nullptr)
+	{
+		LandingWidget->RemoveFromParent();
+	}
+	if (LoadingWidget != nullptr)
+	{
+		LoadingWidget->RemoveFromParent();
+	}
+	if (MapWidget != nullptr)
+	{
+		MapWidget->RemoveFromParent();
 	}
 	if (GenerationDiagnosticsWidget != nullptr)
 	{
@@ -2344,9 +2379,11 @@ void AWorldDirectorFixtureBootstrap::BeginPlay()
 		EnableInput(PlayerController);
 		if (InputComponent != nullptr)
 		{
+			InputComponent->BindKey(EKeys::L, IE_Pressed, this, &AWorldDirectorFixtureBootstrap::OpenLandingPage);
 			InputComponent->BindKey(EKeys::N, IE_Pressed, this, &AWorldDirectorFixtureBootstrap::ToggleWorldCreationMenu);
 			InputComponent->BindKey(EKeys::F8, IE_Pressed, this, &AWorldDirectorFixtureBootstrap::ToggleGenerationDiagnostics);
 			InputComponent->BindKey(EKeys::Tab, IE_Pressed, this, &AWorldDirectorFixtureBootstrap::ToggleInteractionCursor);
+			InputComponent->BindKey(EKeys::M, IE_Pressed, this, &AWorldDirectorFixtureBootstrap::ToggleMapView);
 		}
 	}
 	if (FParse::Param(FCommandLine::Get(), TEXT("WorldDirectorReplayGenerationAutoTest")))
@@ -2363,6 +2400,29 @@ void AWorldDirectorFixtureBootstrap::BeginPlay()
 		{
 			bAutomatedGenerationPrompted =
 				!State->GetActiveWorldSpec().Brief.PlayerPrompt.TrimStartAndEnd().IsEmpty();
+		}
+		FTimerHandle TimerHandle;
+		GetWorldTimerManager().SetTimer(
+			TimerHandle, this, &AWorldDirectorFixtureBootstrap::RunAutomatedGenerationViabilityCheck, 5.0f, false);
+		return;
+	}
+	if (FParse::Param(FCommandLine::Get(), TEXT("WorldDirectorSavedWorldAutoTest")))
+	{
+		RefreshSavedWorldCatalog();
+		if (SavedWorldCatalog.IsEmpty())
+		{
+			UE_LOG(LogWorldDirector, Error,
+				TEXT("WORLD_DIRECTOR_SAVED_WORLD_AUTO_TEST_RESULT=FAIL reason=no_loadable_worlds"));
+			FGenericPlatformMisc::RequestExitWithStatus(true, 1);
+			return;
+		}
+		OpenSavedWorld(SavedWorldCatalog[0].RecipePath);
+		if (CompiledTown == nullptr)
+		{
+			UE_LOG(LogWorldDirector, Error,
+				TEXT("WORLD_DIRECTOR_SAVED_WORLD_AUTO_TEST_RESULT=FAIL reason=load_failed"));
+			FGenericPlatformMisc::RequestExitWithStatus(true, 1);
+			return;
 		}
 		FTimerHandle TimerHandle;
 		GetWorldTimerManager().SetTimer(
@@ -2432,7 +2492,7 @@ void AWorldDirectorFixtureBootstrap::BeginPlay()
 		FParse::Param(FCommandLine::Get(), TEXT("WorldDirectorVisualCapture"));
 	if (!bRuntimeFixtureTest)
 	{
-		OpenWorldCreationMenu();
+		OpenLandingPage();
 		return;
 	}
 	if (!CompileFixture())
@@ -2480,8 +2540,357 @@ void AWorldDirectorFixtureBootstrap::BeginPlay()
 	}
 }
 
+void AWorldDirectorFixtureBootstrap::OpenLandingPage()
+{
+	APlayerController* PlayerController = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	if (PlayerController == nullptr)
+	{
+		if (GetWorld() != nullptr && GetNetMode() != NM_DedicatedServer &&
+			!GetWorldTimerManager().IsTimerActive(CreationMenuRetryHandle))
+		{
+			GetWorldTimerManager().SetTimer(CreationMenuRetryHandle, this,
+				&AWorldDirectorFixtureBootstrap::OpenLandingPage, 0.1f, false);
+		}
+		return;
+	}
+	GetWorldTimerManager().ClearTimer(CreationMenuRetryHandle);
+	if (LandingWidget == nullptr)
+	{
+		LandingWidget = CreateWidget<UWorldDirectorLandingWidget>(
+			PlayerController, UWorldDirectorLandingWidget::StaticClass());
+		if (LandingWidget != nullptr)
+		{
+			LandingWidget->InitializeForBootstrap(this);
+		}
+	}
+	if (LandingWidget != nullptr && !LandingWidget->IsInViewport())
+	{
+		LandingWidget->AddToViewport(200);
+	}
+	if (LandingWidget != nullptr)
+	{
+		LandingWidget->RefreshSavedWorlds();
+		LandingWidget->ApplyViewportLayout();
+	}
+	ApplyPlayerInputMode();
+	UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_LANDING state=%s"),
+		LandingWidget != nullptr && LandingWidget->IsInViewport() ? TEXT("VISIBLE") : TEXT("FAILED"));
+}
+
+void AWorldDirectorFixtureBootstrap::CloseLandingPage()
+{
+	if (LandingWidget != nullptr)
+	{
+		LandingWidget->RemoveFromParent();
+	}
+	ApplyPlayerInputMode();
+}
+
+void AWorldDirectorFixtureBootstrap::RefreshSavedWorldCatalog()
+{
+	SavedWorldCatalog.Reset();
+
+	UWorldGenerationSubsystem* Generation = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UWorldGenerationSubsystem>() : nullptr;
+	if (Generation == nullptr)
+	{
+		return;
+	}
+
+	const FString RunsDirectory = WorldDirectorRunsDirectory();
+	TArray<FString> RecipePaths;
+	IFileManager::Get().FindFilesRecursive(
+		RecipePaths, *RunsDirectory, TEXT("06-resolved-world-v3.json"), true, false);
+	RecipePaths.Sort([](const FString& Left, const FString& Right)
+	{
+		return Left > Right;
+	});
+
+	for (const FString& RecipePath : RecipePaths)
+	{
+		if (!IsWorldDirectorRecipePath(RecipePath))
+		{
+			continue;
+		}
+
+		FString RecipeJson;
+		FResolvedWorldPlan Plan;
+		FValidationReport RecipeReport;
+		if (!FFileHelper::LoadFileToString(RecipeJson, *RecipePath) ||
+			!FWorldDirectorJson::LoadResolvedWorldPlan(RecipeJson, Plan, RecipeReport))
+		{
+			continue;
+		}
+
+		const FString IntegratedPath = FPaths::Combine(
+			FPaths::GetPath(RecipePath), TEXT("05-integrated-world.json"));
+		FString IntegratedJson;
+		FGeneratedWorldSpec Spec;
+		FValidationReport SpecReport;
+		if (!FFileHelper::LoadFileToString(IntegratedJson, *IntegratedPath) ||
+			!Generation->LoadAndValidateWorldSpec(IntegratedJson, Spec, SpecReport) ||
+			!Generation->ValidateFullSliceWorldSpec(Spec).bValid ||
+			Plan.SourceSpecId != Spec.Id || Plan.Seed != Spec.Seed)
+		{
+			continue;
+		}
+
+		const FString RunId = FPaths::GetCleanFilename(FPaths::GetPath(RecipePath));
+		FString SettlementIdentity = Spec.Brief.SettlementIdentity.TrimStartAndEnd();
+		if (SettlementIdentity.IsEmpty())
+		{
+			SettlementIdentity = Spec.Id;
+		}
+		FWorldDirectorSavedWorldEntry& Entry = SavedWorldCatalog.AddDefaulted_GetRef();
+		Entry.DisplayName = FString::Printf(
+			TEXT("%s  |  seed %d  |  %s"), *SettlementIdentity, Plan.Seed, *RunId);
+		Entry.RecipePath = FPaths::ConvertRelativePathToFull(RecipePath);
+		Entry.RunId = RunId;
+		Entry.Seed = Plan.Seed;
+	}
+
+	UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_SAVED_WORLDS count=%d"), SavedWorldCatalog.Num());
+}
+
+void AWorldDirectorFixtureBootstrap::OpenSavedWorld(const FString& RecipePath)
+{
+	if (!IsWorldDirectorRecipePath(RecipePath))
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_SAVED_WORLD_LOAD_RESULT=FAIL reason=invalid_recipe_path path=%s"),
+			*RecipePath);
+		return;
+	}
+
+	UWorldGenerationSubsystem* Generation = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UWorldGenerationSubsystem>() : nullptr;
+	if (Generation == nullptr)
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_SAVED_WORLD_LOAD_RESULT=FAIL reason=generation_subsystem_missing"));
+		return;
+	}
+
+	const FString NormalizedRecipePath = FPaths::ConvertRelativePathToFull(RecipePath);
+	FString RecipeJson;
+	FResolvedWorldPlan Plan;
+	FValidationReport RecipeReport;
+	if (!FFileHelper::LoadFileToString(RecipeJson, *NormalizedRecipePath) ||
+		!FWorldDirectorJson::LoadResolvedWorldPlan(RecipeJson, Plan, RecipeReport))
+	{
+		LastCompilationReport = RecipeReport;
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_SAVED_WORLD_LOAD_RESULT=FAIL reason=recipe_invalid path=%s"),
+			*NormalizedRecipePath);
+		OpenLandingPage();
+		return;
+	}
+
+	const FString IntegratedPath = FPaths::Combine(
+		FPaths::GetPath(NormalizedRecipePath), TEXT("05-integrated-world.json"));
+	FString IntegratedJson;
+	FGeneratedWorldSpec Spec;
+	FValidationReport SpecReport;
+	if (!FFileHelper::LoadFileToString(IntegratedJson, *IntegratedPath) ||
+		!Generation->LoadAndValidateWorldSpec(IntegratedJson, Spec, SpecReport))
+	{
+		LastCompilationReport = SpecReport;
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_SAVED_WORLD_LOAD_RESULT=FAIL reason=integrated_spec_invalid path=%s"),
+			*IntegratedPath);
+		OpenLandingPage();
+		return;
+	}
+	const FValidationReport FullSpecReport = Generation->ValidateFullSliceWorldSpec(Spec);
+	if (!FullSpecReport.bValid || Plan.SourceSpecId != Spec.Id || Plan.Seed != Spec.Seed)
+	{
+		LastCompilationReport = FullSpecReport;
+		if (Plan.SourceSpecId != Spec.Id || Plan.Seed != Spec.Seed)
+		{
+			LastCompilationReport.AddError(
+				TEXT("saved_world.artifact_mismatch"), TEXT("$"),
+				TEXT("The semantic world and physical replay recipe do not belong to the same run."));
+		}
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_SAVED_WORLD_LOAD_RESULT=FAIL reason=artifact_mismatch_or_incomplete path=%s"),
+			*NormalizedRecipePath);
+		OpenLandingPage();
+		return;
+	}
+
+	CloseLandingPage();
+	CloseWorldCreationMenu();
+	DestroyCurrentTown();
+	AWorldDirectorTownActor* SpawnedTown = nullptr;
+	LastCompilationReport = FValidationReport();
+	if (!Generation->CompileResolvedWorld(this, Plan, SpawnedTown, LastCompilationReport) ||
+		SpawnedTown == nullptr)
+	{
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_SAVED_WORLD_LOAD_RESULT=FAIL reason=runtime_compile_failed path=%s"),
+			*NormalizedRecipePath);
+		OpenLandingPage();
+		return;
+	}
+
+	CompiledTown = SpawnedTown;
+	if (UWorldStateSubsystem* State = GetWorld()->GetSubsystem<UWorldStateSubsystem>())
+	{
+		State->SetActiveWorldSpec(Spec);
+	}
+	UTownSimulationSubsystem* Simulation = GetWorld()->GetSubsystem<UTownSimulationSubsystem>();
+	if (Simulation == nullptr || !Simulation->InitializeLivingTown(Spec, SpawnedTown, LastCompilationReport))
+	{
+		if (Simulation != nullptr)
+		{
+			Simulation->ShutdownLivingTown();
+		}
+		if (UChangeProjectSubsystem* Projects = GetWorld()->GetSubsystem<UChangeProjectSubsystem>())
+		{
+			Projects->ShutdownProjects();
+		}
+		if (UWorldStateSubsystem* State = GetWorld()->GetSubsystem<UWorldStateSubsystem>())
+		{
+			State->ClearActiveWorldSpec();
+		}
+		SpawnedTown->DestroyCompiledContent();
+		CompiledTown = nullptr;
+		UE_LOG(LogWorldDirector, Error,
+			TEXT("WORLD_DIRECTOR_SAVED_WORLD_LOAD_RESULT=FAIL reason=simulation_init_failed path=%s"),
+			*NormalizedRecipePath);
+		OpenLandingPage();
+		return;
+	}
+
+	ApplyPlayerInputMode();
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_SAVED_WORLD_LOAD_RESULT=PASS run=%s seed=%d"),
+		*FPaths::GetCleanFilename(FPaths::GetPath(NormalizedRecipePath)), Plan.Seed);
+}
+
+void AWorldDirectorFixtureBootstrap::BeginSampleWorldPreview()
+{
+	if (LoadingWidget != nullptr && LoadingWidget->IsInViewport())
+	{
+		return;
+	}
+	CloseLandingPage();
+	OpenLoadingScreen(true);
+	GetWorldTimerManager().SetTimer(
+		SampleWorldCompileHandle, this, &AWorldDirectorFixtureBootstrap::CompileSampleWorldPreview, 0.05f, false);
+}
+
+void AWorldDirectorFixtureBootstrap::CompileSampleWorldPreview()
+{
+	GetWorldTimerManager().ClearTimer(SampleWorldCompileHandle);
+	const bool bCompiled = CompileFixture();
+	CloseLoadingScreen();
+	if (!bCompiled)
+	{
+		OpenLandingPage();
+		UE_LOG(LogWorldDirector, Error, TEXT("WORLD_DIRECTOR_SAMPLE_WORLD_RESULT=FAIL"));
+		return;
+	}
+	UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_SAMPLE_WORLD_RESULT=PASS"));
+}
+
+void AWorldDirectorFixtureBootstrap::OpenLoadingScreen(const bool bForSampleWorld)
+{
+	APlayerController* PlayerController = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	if (PlayerController == nullptr)
+	{
+		return;
+	}
+	if (LoadingWidget == nullptr)
+	{
+		LoadingWidget = CreateWidget<UWorldDirectorLoadingWidget>(
+			PlayerController, UWorldDirectorLoadingWidget::StaticClass());
+		if (LoadingWidget != nullptr)
+		{
+			LoadingWidget->InitializeForBootstrap(this);
+		}
+	}
+	if (LoadingWidget != nullptr)
+	{
+		LoadingWidget->SetForSampleWorld(bForSampleWorld);
+		if (!LoadingWidget->IsInViewport())
+		{
+			LoadingWidget->AddToViewport(110);
+		}
+		LoadingWidget->ApplyViewportLayout();
+	}
+	ApplyPlayerInputMode();
+}
+
+void AWorldDirectorFixtureBootstrap::CloseLoadingScreen()
+{
+	if (LoadingWidget != nullptr)
+	{
+		LoadingWidget->RemoveFromParent();
+	}
+	ApplyPlayerInputMode();
+}
+
+void AWorldDirectorFixtureBootstrap::OpenMapView()
+{
+	if (CompiledTown == nullptr ||
+		(CreateWorldWidget != nullptr && CreateWorldWidget->IsInViewport()) ||
+		(LandingWidget != nullptr && LandingWidget->IsInViewport()) ||
+		(LoadingWidget != nullptr && LoadingWidget->IsInViewport()) ||
+		(GenerationDiagnosticsWidget != nullptr && GenerationDiagnosticsWidget->IsInViewport()))
+	{
+		return;
+	}
+	if (MapWidget == nullptr)
+	{
+		APlayerController* PlayerController = GetWorld()
+			? GetWorld()->GetFirstPlayerController() : nullptr;
+		if (PlayerController == nullptr)
+		{
+			return;
+		}
+		MapWidget = CreateWidget<UWorldDirectorMapWidget>(
+			PlayerController, UWorldDirectorMapWidget::StaticClass());
+		if (MapWidget != nullptr)
+		{
+			MapWidget->InitializeForBootstrap(this);
+		}
+	}
+	if (MapWidget != nullptr)
+	{
+		MapWidget->InitializeForTown(CompiledTown);
+		if (!MapWidget->IsInViewport())
+		{
+			MapWidget->AddToViewport(110);
+		}
+		MapWidget->ApplyViewportLayout();
+		MapWidget->SetKeyboardFocus();
+	}
+	ApplyPlayerInputMode();
+}
+
+void AWorldDirectorFixtureBootstrap::ToggleMapView()
+{
+	if (MapWidget != nullptr && MapWidget->IsInViewport())
+	{
+		CloseMapView();
+		return;
+	}
+	OpenMapView();
+}
+
+void AWorldDirectorFixtureBootstrap::CloseMapView()
+{
+	if (MapWidget != nullptr)
+	{
+		MapWidget->RemoveFromParent();
+	}
+	ApplyPlayerInputMode();
+}
+
 void AWorldDirectorFixtureBootstrap::OpenWorldCreationMenu()
 {
+	CloseLandingPage();
 	APlayerController* PlayerController = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
 	if (PlayerController == nullptr)
 	{
@@ -2620,6 +3029,9 @@ void AWorldDirectorFixtureBootstrap::ApplyPlayerInputMode()
 		return;
 	}
 	const bool bCreationOpen = CreateWorldWidget != nullptr && CreateWorldWidget->IsInViewport();
+	const bool bLandingOpen = LandingWidget != nullptr && LandingWidget->IsInViewport();
+	const bool bLoadingOpen = LoadingWidget != nullptr && LoadingWidget->IsInViewport();
+	const bool bMapOpen = MapWidget != nullptr && MapWidget->IsInViewport();
 	const bool bDiagnosticsOpen = GenerationDiagnosticsWidget != nullptr && GenerationDiagnosticsWidget->IsInViewport();
 	const bool bInspectionOpen = CompiledTown != nullptr &&
 		CompiledTown->ActiveInspectionWidget != nullptr &&
@@ -2638,15 +3050,33 @@ void AWorldDirectorFixtureBootstrap::ApplyPlayerInputMode()
 		}
 	}
 	const bool bDialogueOpen = ActiveDialogue != nullptr;
-	const bool bCursorVisible = bCreationOpen || bDiagnosticsOpen || bInspectionOpen ||
+	const bool bCursorVisible = bCreationOpen || bLandingOpen || bLoadingOpen || bMapOpen || bDiagnosticsOpen || bInspectionOpen ||
 		bDialogueOpen || bInteractionCursorMode;
 	PlayerController->bShowMouseCursor = bCursorVisible;
 	PlayerController->bEnableClickEvents = bCursorVisible;
 	PlayerController->bEnableMouseOverEvents = bCursorVisible;
-	if (bDiagnosticsOpen)
+	if (bMapOpen)
+	{
+		FInputModeUIOnly InputMode;
+		InputMode.SetWidgetToFocus(MapWidget->TakeWidget());
+		PlayerController->SetInputMode(InputMode);
+	}
+	else if (bDiagnosticsOpen)
 	{
 		FInputModeUIOnly InputMode;
 		InputMode.SetWidgetToFocus(GenerationDiagnosticsWidget->TakeWidget());
+		PlayerController->SetInputMode(InputMode);
+	}
+	else if (bLandingOpen)
+	{
+		FInputModeUIOnly InputMode;
+		InputMode.SetWidgetToFocus(LandingWidget->TakeWidget());
+		PlayerController->SetInputMode(InputMode);
+	}
+	else if (bLoadingOpen)
+	{
+		FInputModeUIOnly InputMode;
+		InputMode.SetWidgetToFocus(LoadingWidget->TakeWidget());
 		PlayerController->SetInputMode(InputMode);
 	}
 	else if (bCreationOpen)
@@ -2689,8 +3119,14 @@ bool AWorldDirectorFixtureBootstrap::BeginPlayerWorldGeneration(
 		this, &AWorldDirectorFixtureBootstrap::HandlePlayerGenerationFinished);
 	Bridge->OnGenerationFinished.AddDynamic(
 		this, &AWorldDirectorFixtureBootstrap::HandlePlayerGenerationFinished);
-	return Bridge->BeginWorldGeneration(PlayerPrompt.TrimStartAndEnd(), FMath::Max(1, Seed),
-		300.0f, bUseFixtureProviderForDebug, Model, ReasoningEffort);
+	const bool bStarted = Bridge->BeginWorldGeneration(PlayerPrompt.TrimStartAndEnd(), FMath::Max(1, Seed),
+		bUseFixtureProviderForDebug ? 300.0f : 420.0f,
+		bUseFixtureProviderForDebug, Model, ReasoningEffort);
+	if (bStarted && !bPlayerFlowAutoTest)
+	{
+		OpenLoadingScreen(false);
+	}
+	return bStarted;
 }
 
 void AWorldDirectorFixtureBootstrap::CancelPlayerWorldGeneration()
@@ -2728,6 +3164,11 @@ void AWorldDirectorFixtureBootstrap::HandlePlayerGenerationFinished(
 	if (CreateWorldWidget != nullptr)
 	{
 		CreateWorldWidget->SetGenerationResult(bPlayable, ResultError);
+	}
+	CloseLoadingScreen();
+	if (bPlayable && !bPlayerFlowAutoTest)
+	{
+		CloseWorldCreationMenu();
 	}
 	ApplyPlayerInputMode();
 	if (bPlayerFlowAutoTest)
@@ -2838,6 +3279,7 @@ bool AWorldDirectorFixtureBootstrap::CompileGeneratedWorld()
 
 void AWorldDirectorFixtureBootstrap::DestroyCurrentTown()
 {
+	CloseMapView();
 	if (UTownSimulationSubsystem* Simulation = GetWorld()
 		? GetWorld()->GetSubsystem<UTownSimulationSubsystem>() : nullptr)
 	{

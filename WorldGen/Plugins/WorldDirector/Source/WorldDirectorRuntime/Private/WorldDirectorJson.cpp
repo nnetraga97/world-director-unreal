@@ -356,8 +356,9 @@ bool FWorldDirectorJson::LoadGeneratedWorldSpec(
 		return false;
 	}
 	FText FailureReason;
-	if (!FJsonObjectConverter::JsonObjectStringToUStruct(
-			Json,
+	if (!FJsonObjectConverter::JsonObjectToUStruct(
+			RootObject.ToSharedRef(),
+			FGeneratedWorldSpec::StaticStruct(),
 			&OutSpec,
 			0,
 			0,
@@ -427,7 +428,14 @@ bool FWorldDirectorJson::LoadResolvedWorldPlan(
 	// Resolved recipes are a versioned replay artifact. Unknown fields remain an
 	// error through ValidateObjectKeys above, while missing additive fields must
 	// retain their reflected defaults so genuine V2 and early V3 saves survive.
-	if (!FJsonObjectConverter::JsonObjectStringToUStruct(Json, &OutPlan, 0, 0, false, &FailureReason))
+	if (!FJsonObjectConverter::JsonObjectToUStruct(
+			RootObject.ToSharedRef(),
+			FResolvedWorldPlan::StaticStruct(),
+			&OutPlan,
+			0,
+			0,
+			false,
+			&FailureReason))
 	{
 		OutParseReport.AddError(TEXT("json.parse_or_shape"), TEXT("$"), FailureReason.ToString());
 		return false;

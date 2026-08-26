@@ -13,12 +13,90 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+
+
+MAX_REQUEST_BYTES = 32_000
+MAX_RESPONSE_BYTES = 64_000
+MAX_VALIDATION_MESSAGE_CHARS = 512
+DEFAULT_COMPANION_TIMEOUT_SECONDS = 360.0
+
+POPULATION_MIN_ITEMS = {
+    "residents": 20,
+    "households": 1,
+    "relationships": 1,
+    "beliefs": 1,
+    "changeProjects": 1,
+}
+
+REPAIR_SECTION_DEFINITIONS = {
+    "brief": ("object", "WorldBrief"),
+    "topology": ("object", "TownTopology"),
+    "locations": ("array", "WorldLocation"),
+    "residents": ("array", "Resident"),
+    "households": ("array", "Household"),
+    "relationships": ("array", "Relationship"),
+    "beliefs": ("array", "Belief"),
+    "facts": ("array", "WorldFact"),
+    "events": ("array", "WorldEvent"),
+    "threats": ("array", "Threat"),
+    "changeProjects": ("array", "ChangeProject"),
+}
+
+_ACTIVE_AGENT_PROCESS: subprocess.Popen[str] | None = None
+_ACTIVE_TELEMETRY_PATH: Path | None = None
+
+
+def _terminate_process_tree(process: subprocess.Popen[str], force: bool = False) -> None:
+    """Terminate the CLI and its process group on POSIX hosts."""
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    try:
+        process.kill() if force else process.terminate()
+    except ProcessLookupError:
+        pass
+
+
+def _write_interrupted_telemetry(signum: int, _frame: object) -> None:
+    """Leave a bounded artifact when Unreal cancels the companion process."""
+    global _ACTIVE_AGENT_PROCESS
+    if _ACTIVE_AGENT_PROCESS is not None:
+        _terminate_process_tree(_ACTIVE_AGENT_PROCESS)
+    if _ACTIVE_TELEMETRY_PATH is not None:
+        _ACTIVE_TELEMETRY_PATH.write_text(
+            json.dumps(
+                {
+                    "companionOutcome": "interrupted",
+                    "signal": signum,
+                    "timedOut": False,
+                    "usageAvailable": False,
+                    "error": "Companion interrupted by Unreal before the CLI completed.",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    raise SystemExit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, _write_interrupted_telemetry)
+if hasattr(signal, "SIGINT"):
+    signal.signal(signal.SIGINT, _write_interrupted_telemetry)
 
 
 STAGE_KEYS = {
@@ -95,11 +173,48 @@ def _referenced_definitions(value: object) -> set[str]:
     return names
 
 
+def _repair_schema_for_target(target: dict, canonical_defs: dict) -> dict:
+    section = str(target.get("section", ""))
+    wire_type, definition = REPAIR_SECTION_DEFINITIONS.get(section, (None, None))
+    if definition is None:
+        raise ValueError(f"repair target has unsupported section '{section}'")
+    value_schema: dict
+    if wire_type == "array":
+        item_schema = {"$ref": f"#/$defs/{definition}"}
+        value_schema = {"type": "array", "items": item_schema}
+    else:
+        value_schema = {"$ref": f"#/$defs/{definition}"}
+    properties = {
+        "section": {"const": section},
+        "value": value_schema,
+    }
+    required = ["section", "value"]
+    if "index" in target and target["index"] is not None:
+        properties["index"] = {"const": int(target["index"]), "type": "integer"}
+        required.append("index")
+        if wire_type == "array":
+            properties["value"] = {"$ref": f"#/$defs/{definition}"}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": required,
+        "properties": properties,
+    }
+
+
 def stage_response_schema(request: dict) -> dict:
     """Build a neutral, stage-specific schema without fixture names or content."""
     stage = request["stage"]
     schema_path = Path(__file__).resolve().parents[1] / "Schemas" / "world-director.schema.json"
-    canonical_defs = load_json(schema_path)["$defs"]
+    canonical_defs = copy.deepcopy(load_json(schema_path)["$defs"])
+    if stage in {"population", "repair"}:
+        resident_definition = canonical_defs.get("Resident")
+        if isinstance(resident_definition, dict):
+            resident_properties = resident_definition.setdefault("properties", {})
+            for field in ("importantMemories", "beliefIds", "relationshipIds"):
+                field_schema = resident_properties.get(field)
+                if isinstance(field_schema, dict):
+                    field_schema["minItems"] = 1
     payload_properties = {}
     initial_defs: set[str] = set()
     for field, (wire_type, definition) in STAGE_DEFINITIONS[stage].items():
@@ -108,6 +223,8 @@ def stage_response_schema(request: dict) -> dict:
             field_schema = {"$ref": f"#/$defs/{definition}"}
             if wire_type == "array":
                 field_schema = {"type": "array", "items": field_schema}
+                if stage == "population" and field in POPULATION_MIN_ITEMS:
+                    field_schema["minItems"] = POPULATION_MIN_ITEMS[field]
         elif stage == "layout":
             candidate_ids = [
                 item.get("opaqueId")
@@ -116,25 +233,45 @@ def stage_response_schema(request: dict) -> dict:
             ]
             field_schema = {"type": "string", "enum": candidate_ids}
         elif stage == "repair":
-            field_schema = {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["section", "value"],
-                    "properties": {
-                        "section": {"type": "string"},
-                        "index": {"type": "integer", "minimum": 0},
-                        "value": {},
+            targets = [
+                target
+                for target in request.get("repairTargets", [])
+                if isinstance(target, dict)
+            ]
+            if targets:
+                field_schema = {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            _repair_schema_for_target(target, canonical_defs)
+                            for target in targets
+                        ]
                     },
-                },
-            }
+                }
+            else:
+                field_schema = {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["section", "value"],
+                        "properties": {
+                            "section": {
+                                "type": "string",
+                                "enum": list(REPAIR_SECTION_DEFINITIONS),
+                            },
+                            "index": {"type": "integer", "minimum": 0},
+                            "value": {},
+                        },
+                    },
+                }
         else:
             field_schema = {"type": wire_type}
         payload_properties[field] = field_schema
 
     required_defs = set(initial_defs)
-    pending = list(initial_defs)
+    required_defs.update(_referenced_definitions(payload_properties))
+    pending = list(required_defs)
     while pending:
         name = pending.pop()
         definition = canonical_defs.get(name)
@@ -160,6 +297,109 @@ def stage_response_schema(request: dict) -> dict:
         },
         "$defs": {name: canonical_defs[name] for name in sorted(required_defs)},
     }
+
+
+def _schema_type_matches(value: object, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return True
+
+
+def _validate_schema_value(
+    value: object,
+    schema: dict,
+    definitions: dict,
+    path: str,
+) -> None:
+    if "$ref" in schema:
+        reference = schema["$ref"]
+        if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+            raise ValueError(f"{path}: unsupported schema reference")
+        name = reference.rsplit("/", 1)[-1]
+        definition = definitions.get(name)
+        if not isinstance(definition, dict):
+            raise ValueError(f"{path}: missing schema definition '{name}'")
+        _validate_schema_value(value, definition, definitions, path)
+        return
+    if "oneOf" in schema:
+        failures = []
+        for option in schema["oneOf"]:
+            try:
+                _validate_schema_value(value, option, definitions, path)
+                return
+            except ValueError as exc:
+                failures.append(str(exc))
+        raise ValueError(f"{path}: no allowed schema variant matched")
+    if "const" in schema and value != schema["const"]:
+        raise ValueError(f"{path}: expected constant {schema['const']!r}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path}: value is not one of the allowed choices")
+    expected_type = schema.get("type")
+    if isinstance(expected_type, str) and not _schema_type_matches(value, expected_type):
+        article = "an " if expected_type in {"object", "array"} else ""
+        raise ValueError(f"{path} must be {article}{expected_type}")
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < int(schema["minLength"]):
+            raise ValueError(f"{path}: string is shorter than the minimum length")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            raise ValueError(f"{path}: string does not match the canonical pattern")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            raise ValueError(f"{path}: number is below the minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            raise ValueError(f"{path}: number is above the maximum")
+    if isinstance(schema.get("not"), dict):
+        try:
+            _validate_schema_value(value, schema["not"], definitions, path)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(f"{path}: value matches a prohibited schema")
+    if isinstance(value, dict):
+        required = schema.get("required", [])
+        missing = [key for key in required if key not in value]
+        if missing:
+            raise ValueError(f"{path}: missing required field(s) {sorted(missing)}")
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            extra = sorted(set(value) - set(properties))
+            if extra:
+                raise ValueError(f"{path}: unknown field(s) {extra}")
+        for key, child in value.items():
+            child_schema = properties.get(key)
+            if isinstance(child_schema, dict):
+                _validate_schema_value(child, child_schema, definitions, f"{path}.{key}")
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            raise ValueError(f"{path}: array has too few items")
+        if schema.get("uniqueItems"):
+            fingerprints = {json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value}
+            if len(fingerprints) != len(value):
+                raise ValueError(f"{path}: array items must be unique")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                _validate_schema_value(item, item_schema, definitions, f"{path}[{index}]")
+
+
+def validate_json_schema(value: object, schema: dict) -> None:
+    definitions = schema.get("$defs", {})
+    if not isinstance(definitions, dict):
+        raise ValueError("canonical schema has no definitions")
+    _validate_schema_value(value, schema, definitions, "$")
 
 
 def response_envelope_example(stage: str) -> dict:
@@ -247,9 +487,9 @@ def fixture_response(request: dict) -> dict:
 def build_agent_prompt(request: dict) -> str:
     stage = request["stage"]
     capability_summary = request.get("capabilitySummary", {})
-    current = request.get("current", {})
+    current = compact_current_context(request)
     candidates = request.get("layoutCandidates", [])
-    validation = request.get("validationIssues", [])
+    validation = compact_validation_issues(request)
     world_context = request.get("worldContext", {})
     response_schema = stage_response_schema(request)
     envelope_example = response_envelope_example(stage)
@@ -263,17 +503,31 @@ def build_agent_prompt(request: dict) -> str:
         repair_rule = (
             "Return replacements only for reported invalid sections. Use {section, index, value} "
             "for one bad array entry, or {section, value:[...]} when the error names the whole "
-            "array. Do not regenerate valid sections."
+            "array. For object sections, replace the complete object. The supplied repairTargets "
+            "are the only legal targets. Return exactly one replacement for every supplied "
+            "repairTarget; never omit a target or return a partial prefix. Do not regenerate "
+            "valid sections. Use only supplied fact IDs; a threat ID is not a fact or belief ID."
         )
         if request.get("replaceRepeatedFailure"):
             repair_rule += (
                 " A prior targeted repair repeated a validation failure. Replace the invalid "
                 "detail with the closest simpler supported alternative instead of preserving it."
             )
+    population_rule = ""
+    if stage in {"population", "repair"}:
+        population_rule = (
+            "Every resident must have at least one importantMemory, one beliefId, and one "
+            "relationshipId. Every memory.factId and every belief.factId must exactly match an "
+            "ID in the supplied facts array. Every resident beliefId must match an object in "
+            "beliefs, and every relationshipId must match an object in relationships. Create a "
+            "belief object for each referenced beliefId. The supplied facts array is closed and "
+            "authoritative: never use a threat ID as a factId or belief ID."
+        )
     return f"""
 You are the World Director semantic generator. Complete only stage '{stage}'.
 {blank_rule}
 {repair_rule}
+{population_rule}
 Never emit Unreal asset paths, transforms, coordinates, commentary, markdown, or questions.
 Return exactly one strict JSON object. Do not add keys outside this response schema and do not
 emit duplicate keys, NaN, or Infinity. The following is only an outer-envelope example; populate
@@ -305,6 +559,68 @@ Opaque Unreal layout candidates:
 Targeted validation issues:
 {json.dumps(validation, separators=(',', ':'), sort_keys=True)}
 """.strip()
+
+
+def compact_validation_issues(request: dict) -> list[dict]:
+    """Keep every repair class visible without repeating identical issue text."""
+    compact = []
+    seen = set()
+    for issue in request.get("validationIssues", []):
+        if not isinstance(issue, dict):
+            continue
+        code = str(issue.get("code", ""))
+        message = str(issue.get("message", ""))[:MAX_VALIDATION_MESSAGE_CHARS]
+        key = (code, message)
+        if request.get("stage") == "repair" and key in seen:
+            continue
+        seen.add(key)
+        compact.append(
+            {
+                "code": code,
+                "path": str(issue.get("path", "")),
+                "message": message,
+            }
+        )
+    return compact
+
+
+def compact_current_context(request: dict) -> dict:
+    """Keep later prompts focused on decisions the current stage can change."""
+    current = request.get("current", {})
+    if not isinstance(current, dict):
+        return {}
+    stage = request.get("stage")
+    compact = {
+        key: copy.deepcopy(current[key])
+        for key in ("id", "seed")
+        if key in current
+    }
+    if stage in {"topology", "layout", "population"} and "brief" in current:
+        compact["brief"] = copy.deepcopy(current["brief"])
+    if stage in {"layout", "population"}:
+        for key in ("topology", "locations", "facts", "threats"):
+            if key in current:
+                compact[key] = copy.deepcopy(current[key])
+    if stage == "repair":
+        targets = [
+            target
+            for target in request.get("repairTargets", [])
+            if isinstance(target, dict)
+        ]
+        for target in targets:
+            section = target.get("section")
+            if not isinstance(section, str) or section not in current:
+                continue
+            value = current[section]
+            if isinstance(target.get("index"), int) and isinstance(value, list):
+                index = target["index"]
+                if 0 <= index < len(value):
+                    if not isinstance(compact.get(section), dict):
+                        compact[section] = {}
+                    compact[section][str(index)] = copy.deepcopy(value[index])
+            else:
+                compact[section] = copy.deepcopy(value)
+    return compact
 
 
 def strip_code_fence(text: str) -> str:
@@ -412,6 +728,8 @@ def parse_provider_events(events_text: str) -> dict:
 
 
 def validate_stage_response(request: dict, response: dict) -> dict:
+    if not isinstance(response, dict):
+        raise ValueError("agent response must be an object")
     if set(response) != {"stage", "payload"} or response.get("stage") != request["stage"]:
         raise ValueError("agent response has the wrong or non-canonical stage envelope")
     payload = response.get("payload")
@@ -422,34 +740,13 @@ def validate_stage_response(request: dict, response: dict) -> dict:
         missing = sorted(expected - set(payload))
         extra = sorted(set(payload) - expected)
         raise ValueError(f"agent response payload keys differ; missing={missing} extra={extra}")
-    for key, (wire_type, _) in STAGE_DEFINITIONS[request["stage"]].items():
-        value = payload[key]
-        if wire_type == "array" and not isinstance(value, list):
-            raise ValueError(f"agent response payload '{key}' must be an array")
-        if wire_type == "object" and not isinstance(value, dict):
-            raise ValueError(f"agent response payload '{key}' must be an object")
-        if wire_type == "string" and not isinstance(value, str):
-            raise ValueError(f"agent response payload '{key}' must be a string")
-    if request["stage"] == "layout":
-        candidate_ids = {
-            item.get("opaqueId")
-            for item in request.get("layoutCandidates", [])
-            if isinstance(item, dict)
-        }
-        if payload["selectedCandidateId"] not in candidate_ids:
-            raise ValueError("layout response selected an unknown candidate")
-    if request["stage"] == "repair":
-        for index, replacement in enumerate(payload["replacements"]):
-            if not isinstance(replacement, dict) or not {"section", "value"}.issubset(replacement):
-                raise ValueError(f"repair replacement {index} is not canonical")
-            if set(replacement) - {"section", "index", "value"}:
-                raise ValueError(f"repair replacement {index} has unknown keys")
-            if not isinstance(replacement["section"], str):
-                raise ValueError(f"repair replacement {index} section must be a string")
-            if "index" in replacement and (
-                not isinstance(replacement["index"], int) or replacement["index"] < 0
-            ):
-                raise ValueError(f"repair replacement {index} index must be nonnegative")
+    schema = stage_response_schema(request)
+    try:
+        validate_json_schema(response, schema)
+    except ValueError as exc:
+        if request["stage"] == "layout" and "selectedCandidateId" in str(exc):
+            raise ValueError("layout response selected an unknown candidate") from exc
+        raise
     return response
 
 
@@ -503,6 +800,10 @@ def cli_response(request: dict, output_path: Path) -> dict:
             ]
 
     prompt = build_agent_prompt(request)
+    if len(prompt.encode("utf-8")) > MAX_REQUEST_BYTES:
+        raise ValueError(
+            f"constructed prompt exceeds the {MAX_REQUEST_BYTES}-byte local CLI budget"
+        )
     prompt_path = artifact_path(output_path, "prompt.txt")
     raw_response_path = artifact_path(output_path, "raw-response.txt")
     events_path = artifact_path(output_path, "provider-events.jsonl")
@@ -513,16 +814,42 @@ def cli_response(request: dict, output_path: Path) -> dict:
     with tempfile.TemporaryDirectory(prefix="world-director-") as temp_dir:
         agent_output = Path(temp_dir) / "agent-response.json"
         expanded = [arg.replace("{output}", str(agent_output)) for arg in command]
-        completed = subprocess.run(
+        timeout_seconds = float(
+            request.get("companionTimeoutSeconds", DEFAULT_COMPANION_TIMEOUT_SECONDS)
+        )
+        timeout_seconds = max(1.0, timeout_seconds)
+        global _ACTIVE_AGENT_PROCESS, _ACTIVE_TELEMETRY_PATH
+        _ACTIVE_TELEMETRY_PATH = telemetry_path
+        timed_out = False
+        process = subprocess.Popen(
             expanded,
-            input=prompt,
-            text=True,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            text=True,
             env=agent_environment(command[0]),
-            check=False,
+            start_new_session=(os.name == "posix"),
         )
-        provider_events = completed.stdout or ""
+        _ACTIVE_AGENT_PROCESS = process
+        try:
+            try:
+                stdout, stderr = process.communicate(
+                    input=prompt,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _terminate_process_tree(process)
+                try:
+                    stdout, stderr = process.communicate(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    _terminate_process_tree(process, force=True)
+                    stdout, stderr = process.communicate()
+        finally:
+            _ACTIVE_AGENT_PROCESS = None
+            _ACTIVE_TELEMETRY_PATH = None
+        return_code = process.returncode
+        provider_events = stdout or ""
         events_path.write_text(provider_events, encoding="utf-8")
         raw_response = ""
         if agent_output.exists():
@@ -543,8 +870,10 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "rawResponsePath": str(raw_response_path),
                 "providerEventsPath": str(events_path),
                 "telemetryPath": str(telemetry_path),
-                "exitCode": completed.returncode,
-                "providerStderr": (completed.stderr or "")[-8000:],
+                "exitCode": return_code,
+                "providerStderr": (stderr or "")[-8000:],
+                "timedOut": timed_out,
+                "timeoutSeconds": timeout_seconds,
                 "parseSuccess": False,
                 "schemaSuccess": False,
                 "billedCostUsd": None,
@@ -554,14 +883,23 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 ),
             }
         )
-        if completed.returncode != 0:
+        if timed_out:
+            telemetry["companionOutcome"] = "provider_timeout"
+            telemetry["error"] = (
+                f"CLI agent exceeded the companion timeout of {timeout_seconds:.1f} seconds."
+            )
+            telemetry_path.write_text(
+                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
+            )
+            raise RuntimeError(telemetry["error"])
+        if return_code != 0:
             telemetry["companionOutcome"] = "provider_error"
             telemetry_path.write_text(
                 json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
             )
             raise RuntimeError(
-                f"configured CLI agent exited {completed.returncode}: "
-                f"{completed.stderr[-2000:]}"
+                f"configured CLI agent exited {return_code}: "
+                f"{(stderr or '')[-2000:]}"
             )
         if not raw_response:
             telemetry["companionOutcome"] = "missing_response"
@@ -569,6 +907,15 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
             )
             raise RuntimeError("configured CLI agent produced no last-message file")
+        if len(raw_response.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            telemetry["companionOutcome"] = "response_too_large"
+            telemetry["responseValidationError"] = (
+                f"response exceeds the {MAX_RESPONSE_BYTES}-byte local CLI budget"
+            )
+            telemetry_path.write_text(
+                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
+            )
+            raise ValueError(telemetry["responseValidationError"])
         try:
             response = strict_json_loads(strip_code_fence(raw_response))
             telemetry["parseSuccess"] = True

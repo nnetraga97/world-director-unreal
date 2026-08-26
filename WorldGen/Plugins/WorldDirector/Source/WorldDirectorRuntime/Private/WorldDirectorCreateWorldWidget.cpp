@@ -275,9 +275,9 @@ void UWorldDirectorCreateWorldWidget::BuildWidgetTree()
 	{
 		ModelInput->AddOption(Model);
 	}
-	ModelInput->SetSelectedOption(TEXT("gpt-5.6-terra"));
+	ModelInput->SetSelectedOption(TEXT("gpt-5.6-luna"));
 	ModelInput->SetToolTipText(FText::FromString(
-		TEXT("AI model used for semantic world planning. Terra is the balanced default.")));
+		TEXT("AI model used for semantic world planning. Luna is the default for richer world coherence.")));
 	ModelField->AddChildToVerticalBox(ModelInput);
 
 	UVerticalBox* ReasoningField = AddField(
@@ -286,7 +286,7 @@ void UWorldDirectorCreateWorldWidget::BuildWidgetTree()
 	RefreshReasoningOptions(ModelInput->GetSelectedOption());
 	ModelInput->OnSelectionChanged.AddDynamic(this, &UWorldDirectorCreateWorldWidget::HandleModelChanged);
 	ReasoningInput->SetToolTipText(FText::FromString(
-		TEXT("Reasoning effort requested from the selected model. Medium is the balanced default.")));
+		TEXT("Reasoning effort requested from the selected model. High is the default for Luna.")));
 	ReasoningField->AddChildToVerticalBox(ReasoningInput);
 
 	FixtureCheck = WidgetTree->ConstructWidget<UCheckBox>();
@@ -493,7 +493,8 @@ void UWorldDirectorCreateWorldWidget::RefreshReasoningOptions(const FString& Sel
 	ReasoningInput->SetSelectedOption(
 		ReasoningInput->FindOptionIndex(PreviousSelection) != INDEX_NONE
 			? PreviousSelection
-			: TEXT("medium"));
+			: (SelectedModel.Contains(TEXT("luna"), ESearchCase::IgnoreCase)
+				? TEXT("high") : TEXT("medium")));
 }
 
 void UWorldDirectorCreateWorldWidget::UpdatePromptCharacterCount()

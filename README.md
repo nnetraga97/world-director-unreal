@@ -76,12 +76,16 @@ The primary test map is:
 
 | Key | Action |
 | --- | --- |
+| `L` | Open the saved-world browser |
 | `N` | Open or close Create World |
 | `F8` | Open or close AI Diagnostics |
 | `Tab` | Toggle the interaction cursor |
 | `I` | Open or close World Director inspection |
+| `M` | Open or close the top-down settlement map |
 
 Within Create World, `Ctrl+Enter` starts generation. In Diagnostics, `Ctrl+Left` and `Ctrl+Right` change the selected stage and `Ctrl+C` copies the visible report.
+
+On the landing screen, choose a completed world and select `LOAD SELECTED WORLD` to rebuild it from its local replay recipe. On the settlement map, hover a location marker for details, left-click to set or move a waypoint, and right-click to clear the waypoint.
 
 Click a resident while the interaction cursor is enabled to open dialogue.
 

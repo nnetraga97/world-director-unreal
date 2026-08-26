@@ -10,7 +10,7 @@ void FValidationReport::AddError(
 	Issue.Severity = EWorldDirectorValidationSeverity::Error;
 	Issue.Code = Code;
 	Issue.Path = Path;
-	Issue.Message = Message;
+	Issue.Message = Message.Left(512);
 }
 
 void FValidationReport::AddWarning(
@@ -22,5 +22,5 @@ void FValidationReport::AddWarning(
 	Issue.Severity = EWorldDirectorValidationSeverity::Warning;
 	Issue.Code = Code;
 	Issue.Path = Path;
-	Issue.Message = Message;
+	Issue.Message = Message.Left(512);
 }

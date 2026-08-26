@@ -178,6 +178,7 @@ public:
 		const FWorldLocation& UpdatedLocation,
 		const FChangeProject& Project,
 		FValidationReport& OutReport);
+	const FResolvedWorldPlan& GetCompiledPlan() const { return CompiledPlan; }
 	void DestroyCompiledContent();
 
 	UFUNCTION(BlueprintCallable, Category = "World Director|Inspection")
@@ -251,6 +252,27 @@ private:
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<class ALandscapeProxy>> HiddenAuthoredLandscapes;
+
+	UPROPERTY(Transient)
+	FResolvedWorldPlan CompiledPlan;
+};
+
+USTRUCT(BlueprintType)
+struct WORLDDIRECTORRUNTIME_API FWorldDirectorSavedWorldEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Saved World")
+	FString DisplayName;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Saved World")
+	FString RecipePath;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Saved World")
+	FString RunId;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Saved World")
+	int32 Seed = 0;
 };
 
 UCLASS(BlueprintType)
@@ -312,6 +334,34 @@ public:
 	void CloseWorldCreationMenu();
 
 	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
+	void OpenLandingPage();
+	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
+	void CloseLandingPage();
+	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
+	void BeginSampleWorldPreview();
+
+	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
+	void RefreshSavedWorldCatalog();
+
+	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
+	void OpenSavedWorld(const FString& RecipePath);
+
+	const TArray<FWorldDirectorSavedWorldEntry>& GetSavedWorldCatalog() const
+	{
+		return SavedWorldCatalog;
+	}
+
+	void OpenLoadingScreen(bool bForSampleWorld = false);
+	void CloseLoadingScreen();
+
+	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
+	void OpenMapView();
+	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
+	void ToggleMapView();
+	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
+	void CloseMapView();
+
+	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
 	void OpenGenerationDiagnostics();
 	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
 	void ToggleGenerationDiagnostics();
@@ -354,7 +404,19 @@ public:
 	TObjectPtr<class UWorldDirectorCreateWorldWidget> CreateWorldWidget;
 
 	UPROPERTY(Transient)
+	TObjectPtr<class UWorldDirectorLandingWidget> LandingWidget;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UWorldDirectorLoadingWidget> LoadingWidget;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UWorldDirectorMapWidget> MapWidget;
+
+	UPROPERTY(Transient)
 	TObjectPtr<class UWorldDirectorGenerationDiagnosticsWidget> GenerationDiagnosticsWidget;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "World Director|Saved World")
+	TArray<FWorldDirectorSavedWorldEntry> SavedWorldCatalog;
 
 private:
 	bool CompileGeneratedWorld();
@@ -362,6 +424,8 @@ private:
 	void ApplyPlayerInputMode();
 	bool bInteractionCursorMode = false;
 	FTimerHandle CreationMenuRetryHandle;
+	FTimerHandle SampleWorldCompileHandle;
+	void CompileSampleWorldPreview();
 	TMap<FString, FVector> TravelCheckStartLocations;
 	bool bAutomatedGenerationPrompted = false;
 	bool bAutomatedGenerationExpectsTimeout = false;

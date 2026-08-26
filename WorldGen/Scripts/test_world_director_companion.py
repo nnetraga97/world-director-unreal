@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import sys
+import tempfile
 import unittest
 
 
@@ -125,6 +128,74 @@ class CompanionContractTests(unittest.TestCase):
                 {"stage": "interpret", "payload": {"brief": []}},
             )
 
+    def test_population_schema_rejects_string_resident_memories(self) -> None:
+        request = request_for("population")
+        response = COMPANION.fixture_response(request)
+        response["payload"]["residents"][0]["importantMemories"] = [
+            "memory_flooded_ferry"
+        ]
+        with self.assertRaisesRegex(ValueError, "no allowed schema variant|must be an object"):
+            COMPANION.validate_stage_response(request, response)
+
+    def test_population_schema_rejects_missing_current_location(self) -> None:
+        request = request_for("population")
+        response = COMPANION.fixture_response(request)
+        response["payload"]["residents"][0].pop("currentLocationId")
+        with self.assertRaisesRegex(ValueError, "missing required"):
+            COMPANION.validate_stage_response(request, response)
+
+    def test_population_schema_requires_social_state(self) -> None:
+        request = request_for("population")
+        response = COMPANION.fixture_response(request)
+        response["payload"]["residents"][0]["importantMemories"] = []
+        response["payload"]["residents"][0]["beliefIds"] = []
+        response["payload"]["residents"][0]["relationshipIds"] = []
+        with self.assertRaisesRegex(ValueError, "array has too few items"):
+            COMPANION.validate_stage_response(request, response)
+
+    def test_repair_prompt_preserves_all_distinct_issue_classes(self) -> None:
+        request = request_for("repair")
+        request["validationIssues"] = [
+            {
+                "code": "slice.resident_social_state",
+                "path": "$.residents[0]",
+                "message": "Every resident requires memories, beliefs, and at least one relationship.",
+            },
+            {
+                "code": "slice.resident_social_state",
+                "path": "$.residents[1]",
+                "message": "Every resident requires memories, beliefs, and at least one relationship.",
+            },
+            {
+                "code": "reference.missing",
+                "path": "$.residents[0].importantMemories[0].factId",
+                "message": "Referenced fact ID 'fact.missing' does not exist.",
+            },
+        ]
+        compact = COMPANION.compact_validation_issues(request)
+        self.assertEqual(len(compact), 2)
+        prompt = COMPANION.build_agent_prompt(request)
+        self.assertIn("fact.missing", prompt)
+        self.assertIn("exactly one replacement for every supplied", prompt)
+
+    def test_repair_schema_is_typed_to_the_indexed_target(self) -> None:
+        request = request_for("repair")
+        request["repairTargets"] = [{"section": "residents", "index": 0}]
+        response = COMPANION.fixture_response(
+            {
+                **request,
+                "validationIssues": [
+                    {"path": "$.residents[0].importantMemories"}
+                ],
+            }
+        )
+        self.assertIs(COMPANION.validate_stage_response(request, response), response)
+        response["payload"]["replacements"][0]["value"]["importantMemories"] = [
+            "memory_flooded_ferry"
+        ]
+        with self.assertRaisesRegex(ValueError, "no allowed schema variant"):
+            COMPANION.validate_stage_response(request, response)
+
     def test_provider_event_telemetry_is_explicit_about_missing_usage(self) -> None:
         events = "\n".join(
             [
@@ -140,6 +211,28 @@ class CompanionContractTests(unittest.TestCase):
         self.assertTrue(telemetry["usageAvailable"])
         self.assertEqual(telemetry["inputTokens"], 120)
         self.assertEqual(telemetry["outputTokens"], 30)
+
+    def test_cli_timeout_writes_bounded_telemetry(self) -> None:
+        request = request_for("interpret")
+        request["companionTimeoutSeconds"] = 0.1
+        previous = os.environ.get("WORLD_DIRECTOR_CLI_COMMAND")
+        os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = (
+            f"{sys.executable} -c 'import time; time.sleep(2)'"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                output_path = Path(directory) / "interpret-response.json"
+                with self.assertRaisesRegex(RuntimeError, "timeout"):
+                    COMPANION.cli_response(request, output_path)
+                telemetry_path = output_path.with_name("interpret-telemetry.json")
+                telemetry = json.loads(telemetry_path.read_text(encoding="utf-8"))
+                self.assertEqual(telemetry["companionOutcome"], "provider_timeout")
+                self.assertTrue(telemetry["timedOut"])
+        finally:
+            if previous is None:
+                os.environ.pop("WORLD_DIRECTOR_CLI_COMMAND", None)
+            else:
+                os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = previous
 
 
 if __name__ == "__main__":
