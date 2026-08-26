@@ -29,16 +29,23 @@ const FSlateBrush* WhiteBrush()
 void DrawBox(
 	FSlateWindowElementList& OutDrawElements,
 	const int32 LayerId,
-	const FPaintGeometry& Geometry,
+	const FGeometry& WidgetGeometry,
+	const FVector2D& LocalPosition,
+	const FVector2D& LocalSize,
 	const FLinearColor& Color)
 {
 	FSlateDrawElement::MakeBox(
-		OutDrawElements, LayerId, Geometry, WhiteBrush(), ESlateDrawEffect::None, Color);
+		OutDrawElements, LayerId,
+		WidgetGeometry.ToPaintGeometry(
+			UE::Slate::CastToVector2f(LocalSize),
+			FSlateLayoutTransform(UE::Slate::CastToVector2f(LocalPosition))),
+		WhiteBrush(), ESlateDrawEffect::None, Color);
 }
 
 void DrawLine(
 	FSlateWindowElementList& OutDrawElements,
 	const int32 LayerId,
+	const FGeometry& WidgetGeometry,
 	const TArray<FVector2D>& Points,
 	const FLinearColor& Color,
 	const float Thickness = 1.0f,
@@ -49,7 +56,7 @@ void DrawLine(
 		return;
 	}
 	FSlateDrawElement::MakeLines(
-		OutDrawElements, LayerId, FPaintGeometry(), Points,
+		OutDrawElements, LayerId, WidgetGeometry.ToPaintGeometry(), Points,
 		ESlateDrawEffect::None, Color, true, Thickness);
 	if (bClosed)
 	{
@@ -57,7 +64,7 @@ void DrawLine(
 		ClosingLine.Add(Points.Last());
 		ClosingLine.Add(Points[0]);
 		FSlateDrawElement::MakeLines(
-			OutDrawElements, LayerId, FPaintGeometry(), ClosingLine,
+			OutDrawElements, LayerId, WidgetGeometry.ToPaintGeometry(), ClosingLine,
 			ESlateDrawEffect::None, Color, true, Thickness);
 	}
 }
@@ -65,6 +72,7 @@ void DrawLine(
 void DrawText(
 	FSlateWindowElementList& OutDrawElements,
 	const int32 LayerId,
+	const FGeometry& WidgetGeometry,
 	const FVector2D& Position,
 	const FVector2D& Size,
 	const FString& Text,
@@ -77,7 +85,9 @@ void DrawText(
 	}
 	FSlateDrawElement::MakeText(
 		OutDrawElements, LayerId,
-		FPaintGeometry(Position, Size, 1.0f),
+		WidgetGeometry.ToPaintGeometry(
+			UE::Slate::CastToVector2f(Size),
+			FSlateLayoutTransform(UE::Slate::CastToVector2f(Position))),
 		FText::FromString(Text), Font, ESlateDrawEffect::None, Color);
 }
 
@@ -151,10 +161,12 @@ bool UWorldDirectorMapWidget::ApplyViewportLayout()
 	{
 		return false;
 	}
-	SetAnchorsInViewport(FAnchors(0.0f, 0.0f));
+	// Let the viewport slot own the size. Supplying GetViewportSize() as an
+	// explicit desired size can be stale in PIE/editor viewports, leaving a
+	// shorter widget than the visible game area. That makes both the map frame
+	// and AbsoluteToLocal mouse coordinates appear offset from the cursor.
+	SetAnchorsInViewport(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
 	SetAlignmentInViewport(FVector2D::ZeroVector);
-	SetPositionInViewport(FVector2D::ZeroVector, false);
-	SetDesiredSizeInViewport(ViewportSize);
 	return true;
 }
 
@@ -400,23 +412,23 @@ int32 UWorldDirectorMapWidget::NativePaint(
 	const FLinearColor Muted(0.55f, 0.63f, 0.63f, 1.0f);
 	const FLinearColor Gold(0.96f, 0.72f, 0.30f, 1.0f);
 
-	DrawBox(OutDrawElements, CurrentLayer++, AllottedGeometry.ToPaintGeometry(),
+	DrawBox(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D::ZeroVector, Size,
 		FLinearColor(0.012f, 0.018f, 0.021f, 0.98f));
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(MapOuterMargin, 24.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(MapOuterMargin, 24.0f),
 		FVector2D(700.0f, 34.0f), TEXT("SETTLEMENT MAP"), TitleFont, Gold);
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(MapOuterMargin + 244.0f, 31.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(MapOuterMargin + 244.0f, 31.0f),
 		FVector2D(600.0f, 22.0f),
 		MapSpec.Brief.SettlementIdentity.IsEmpty()
 			? TEXT("LIVE WORLD / NORTH UP")
 			: MapSpec.Brief.SettlementIdentity + TEXT("  /  LIVE WORLD / NORTH UP"),
 		BodyFont, Muted);
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(Size.X - 190.0f, 33.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(Size.X - 190.0f, 33.0f),
 		FVector2D(160.0f, 22.0f), TEXT("M / ESC  CLOSE"), SmallFont, Ink);
 
-	DrawBox(OutDrawElements, CurrentLayer++,
-		FPaintGeometry(MapMin, MapMax - MapMin, 1.0f), FLinearColor(0.045f, 0.09f, 0.085f, 1.0f));
-	DrawBox(OutDrawElements, CurrentLayer++,
-		FPaintGeometry(SidebarMin, SidebarMax - SidebarMin, 1.0f), FLinearColor(0.035f, 0.043f, 0.045f, 1.0f));
+	DrawBox(OutDrawElements, CurrentLayer++, AllottedGeometry, MapMin, MapMax - MapMin,
+		FLinearColor(0.045f, 0.09f, 0.085f, 1.0f));
+	DrawBox(OutDrawElements, CurrentLayer++, AllottedGeometry, SidebarMin, SidebarMax - SidebarMin,
+		FLinearColor(0.035f, 0.043f, 0.045f, 1.0f));
 
 	const FVector2D ContentMin = MapMin + FVector2D(MapPadding);
 	const FVector2D ContentMax = MapMax - FVector2D(MapPadding);
@@ -425,10 +437,12 @@ int32 UWorldDirectorMapWidget::NativePaint(
 	{
 		const float X = FMath::Lerp(ContentMin.X, ContentMax.X, GridIndex / 5.0f);
 		const float Y = FMath::Lerp(ContentMin.Y, ContentMax.Y, GridIndex / 5.0f);
-		DrawLine(OutDrawElements, CurrentLayer, { FVector2D(X, ContentMin.Y), FVector2D(X, ContentMax.Y) }, GridColor, 1.0f);
-		DrawLine(OutDrawElements, CurrentLayer++, { FVector2D(ContentMin.X, Y), FVector2D(ContentMax.X, Y) }, GridColor, 1.0f);
+		DrawLine(OutDrawElements, CurrentLayer, AllottedGeometry,
+			{ FVector2D(X, ContentMin.Y), FVector2D(X, ContentMax.Y) }, GridColor, 1.0f);
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry,
+			{ FVector2D(ContentMin.X, Y), FVector2D(ContentMax.X, Y) }, GridColor, 1.0f);
 	}
-	DrawLine(OutDrawElements, CurrentLayer++,
+	DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry,
 		{ FVector2D(ContentMin.X, ContentMin.Y), FVector2D(ContentMax.X, ContentMin.Y),
 		  FVector2D(ContentMax.X, ContentMax.Y), FVector2D(ContentMin.X, ContentMax.Y) },
 		FLinearColor(0.35f, 0.55f, 0.48f, 0.8f), 1.5f, true);
@@ -441,8 +455,10 @@ int32 UWorldDirectorMapWidget::NativePaint(
 		{
 			Water.Add(WorldToMap(FVector2D(Point), Size));
 		}
-		DrawLine(OutDrawElements, CurrentLayer++, Water, FLinearColor(0.22f, 0.54f, 0.72f, 0.8f), 8.0f);
-		DrawLine(OutDrawElements, CurrentLayer++, Water, FLinearColor(0.42f, 0.76f, 0.86f, 0.85f), 1.5f);
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry, Water,
+			FLinearColor(0.22f, 0.54f, 0.72f, 0.8f), 8.0f);
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry, Water,
+			FLinearColor(0.42f, 0.76f, 0.86f, 0.85f), 1.5f);
 	}
 	for (const FWorldDirectorFarmParcel& Parcel : MapPlan.Terrain.FarmParcels)
 	{
@@ -451,7 +467,8 @@ int32 UWorldDirectorMapWidget::NativePaint(
 		{
 			Boundary.Add(WorldToMap(Point, Size));
 		}
-		DrawLine(OutDrawElements, CurrentLayer++, Boundary, FLinearColor(0.67f, 0.61f, 0.35f, 0.5f), 1.0f, true);
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry, Boundary,
+			FLinearColor(0.67f, 0.61f, 0.35f, 0.5f), 1.0f, true);
 	}
 	for (const FWorldDirectorDistrictAnchor& District : MapPlan.DistrictAnchors)
 	{
@@ -460,9 +477,9 @@ int32 UWorldDirectorMapWidget::NativePaint(
 			18.0f, District.InfluenceRadiusCentimeters /
 			FMath::Max(1.0f, static_cast<float>(MapPlan.Terrain.ExtentCentimeters) * 2.0f) *
 			(ContentMax.X - ContentMin.X));
-		DrawLine(OutDrawElements, CurrentLayer++, MakeCircle(Center, Radius),
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry, MakeCircle(Center, Radius),
 			FLinearColor(0.38f, 0.53f, 0.40f, 0.25f), 1.0f);
-		DrawText(OutDrawElements, CurrentLayer++, Center + FVector2D(7.0f, -8.0f),
+		DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, Center + FVector2D(7.0f, -8.0f),
 			FVector2D(150.0f, 18.0f), District.DistrictId, SmallFont,
 			FLinearColor(0.54f, 0.67f, 0.58f, 0.7f));
 	}
@@ -474,7 +491,7 @@ int32 UWorldDirectorMapWidget::NativePaint(
 		{
 			RoutePoints.Add(WorldToMap(FVector2D(Point), Size));
 		}
-		DrawLine(OutDrawElements, CurrentLayer++, RoutePoints,
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry, RoutePoints,
 			Route.RouteType == TEXT("Road")
 				? FLinearColor(0.87f, 0.73f, 0.45f, 0.92f)
 				: FLinearColor(0.68f, 0.69f, 0.55f, 0.78f),
@@ -487,13 +504,14 @@ int32 UWorldDirectorMapWidget::NativePaint(
 		const FLinearColor Color = MarkerColor(Location.LocationId);
 		const bool bHovered = Location.LocationId == HoveredLocationId;
 		const float Radius = bHovered ? 9.0f : 6.0f;
-		DrawBox(OutDrawElements, CurrentLayer++,
-			FPaintGeometry(Marker - FVector2D(Radius), FVector2D(Radius * 2.0f), 1.0f), Color);
-		DrawLine(OutDrawElements, CurrentLayer++, MakeCircle(Marker, Radius + (bHovered ? 5.0f : 2.0f)),
+		DrawBox(OutDrawElements, CurrentLayer++, AllottedGeometry,
+			Marker - FVector2D(Radius), FVector2D(Radius * 2.0f), Color);
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry,
+			MakeCircle(Marker, Radius + (bHovered ? 5.0f : 2.0f)),
 			bHovered ? Ink : Color, bHovered ? 2.0f : 1.0f);
 		if (bHovered || Location.LocationId == MapPlan.LandmarkLocationId)
 		{
-			DrawText(OutDrawElements, CurrentLayer++, Marker + FVector2D(12.0f, -11.0f),
+			DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, Marker + FVector2D(12.0f, -11.0f),
 				FVector2D(220.0f, 20.0f), DisplayNameForLocation(Location.LocationId),
 				SmallFont, bHovered ? Ink : Color);
 		}
@@ -502,9 +520,9 @@ int32 UWorldDirectorMapWidget::NativePaint(
 	if (bHasWaypoint)
 	{
 		const FVector2D Waypoint = WorldToMap(WaypointWorldPosition, Size);
-		DrawLine(OutDrawElements, CurrentLayer++, MakeCircle(Waypoint, 12.0f),
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry, MakeCircle(Waypoint, 12.0f),
 			FLinearColor(0.93f, 0.38f, 0.74f, 1.0f), 2.0f);
-		DrawLine(OutDrawElements, CurrentLayer++,
+		DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry,
 			{ Waypoint + FVector2D(-17.0f, 0.0f), Waypoint + FVector2D(17.0f, 0.0f),
 			  Waypoint, Waypoint + FVector2D(0.0f, 17.0f),
 			  Waypoint, Waypoint + FVector2D(0.0f, -17.0f) },
@@ -517,52 +535,52 @@ int32 UWorldDirectorMapWidget::NativePaint(
 		if (const APawn* Pawn = PlayerController->GetPawn())
 		{
 			const FVector2D Player = WorldToMap(FVector2D(Pawn->GetActorLocation()), Size);
-			DrawLine(OutDrawElements, CurrentLayer++, MakeCircle(Player, 9.0f),
+			DrawLine(OutDrawElements, CurrentLayer++, AllottedGeometry, MakeCircle(Player, 9.0f),
 				FLinearColor(0.98f, 0.94f, 0.76f, 1.0f), 2.0f);
-			DrawBox(OutDrawElements, CurrentLayer++,
-				FPaintGeometry(Player - FVector2D(3.0f), FVector2D(6.0f), 1.0f),
+			DrawBox(OutDrawElements, CurrentLayer++, AllottedGeometry,
+				Player - FVector2D(3.0f), FVector2D(6.0f),
 				FLinearColor(0.98f, 0.94f, 0.76f, 1.0f));
 		}
 	}
 
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(MapMin.X + 12.0f, MapMin.Y + 10.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(MapMin.X + 12.0f, MapMin.Y + 10.0f),
 		FVector2D(30.0f, 18.0f), TEXT("N"), SectionFont, Ink);
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(MapMin.X + 12.0f, MapMax.Y - 28.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(MapMin.X + 12.0f, MapMax.Y - 28.0f),
 		FVector2D(30.0f, 18.0f), TEXT("S"), SmallFont, Muted);
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(MapMin.X + 13.0f, MapMax.Y - 19.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(MapMin.X + 13.0f, MapMax.Y - 19.0f),
 		FVector2D(30.0f, 18.0f), TEXT("W"), SmallFont, Muted);
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(MapMax.X - 24.0f, MapMax.Y - 19.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(MapMax.X - 24.0f, MapMax.Y - 19.0f),
 		FVector2D(30.0f, 18.0f), TEXT("E"), SmallFont, Muted);
 
 	const float SidebarTextX = SidebarMin.X + 20.0f;
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(SidebarTextX, SidebarMin.Y + 22.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(SidebarTextX, SidebarMin.Y + 22.0f),
 		FVector2D(220.0f, 22.0f), TEXT("MAP DETAILS"), SectionFont, Gold);
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(SidebarTextX, SidebarMin.Y + 60.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(SidebarTextX, SidebarMin.Y + 60.0f),
 		FVector2D(220.0f, 18.0f), TEXT("HOVERED FEATURE"), SmallFont, Muted);
 	const FString HoverTitle = HoveredLocationId.IsEmpty()
 		? TEXT("Move over a location marker") : DisplayNameForLocation(HoveredLocationId);
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(SidebarTextX, SidebarMin.Y + 82.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(SidebarTextX, SidebarMin.Y + 82.0f),
 		FVector2D(SidebarMax.X - SidebarTextX - 16.0f, 42.0f), HoverTitle, BodyFont, Ink);
 	if (!HoveredLocationId.IsEmpty())
 	{
-		DrawText(OutDrawElements, CurrentLayer++, FVector2D(SidebarTextX, SidebarMin.Y + 112.0f),
+		DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(SidebarTextX, SidebarMin.Y + 112.0f),
 			FVector2D(230.0f, 20.0f), PurposeForLocation(HoveredLocationId), SmallFont, Muted);
 	}
 
 	const float WaypointY = SidebarMin.Y + 166.0f;
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(SidebarTextX, WaypointY),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(SidebarTextX, WaypointY),
 		FVector2D(220.0f, 18.0f), TEXT("WAYPOINT"), SmallFont, Muted);
 	const FString WaypointText = !bHasWaypoint
 		? TEXT("None set")
 		: WaypointLocationId.IsEmpty()
 			? FString::Printf(TEXT("Free point  %+.0f, %+.0f"), WaypointWorldPosition.X, WaypointWorldPosition.Y)
 			: DisplayNameForLocation(WaypointLocationId);
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(SidebarTextX, WaypointY + 22.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(SidebarTextX, WaypointY + 22.0f),
 			FVector2D(SidebarMax.X - SidebarTextX - 16.0f, 40.0f), WaypointText, BodyFont,
 			bHasWaypoint ? FLinearColor(0.98f, 0.66f, 0.86f, 1.0f) : Muted);
 
 	const float LegendY = SidebarMax.Y - 192.0f;
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(SidebarTextX, LegendY),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(SidebarTextX, LegendY),
 		FVector2D(220.0f, 18.0f), TEXT("LEGEND"), SmallFont, Muted);
 	const TArray<TPair<FString, FLinearColor>> Legend = {
 		{ TEXT("Landmark"), FLinearColor(0.98f, 0.73f, 0.22f, 1.0f) },
@@ -573,13 +591,13 @@ int32 UWorldDirectorMapWidget::NativePaint(
 	for (int32 Index = 0; Index < Legend.Num(); ++Index)
 	{
 		const float Y = LegendY + 25.0f + Index * 23.0f;
-		DrawBox(OutDrawElements, CurrentLayer++,
-			FPaintGeometry(FVector2D(SidebarTextX, Y + 3.0f), FVector2D(10.0f), 1.0f), Legend[Index].Value);
-		DrawText(OutDrawElements, CurrentLayer++, FVector2D(SidebarTextX + 20.0f, Y),
+		DrawBox(OutDrawElements, CurrentLayer++, AllottedGeometry,
+			FVector2D(SidebarTextX, Y + 3.0f), FVector2D(10.0f), Legend[Index].Value);
+		DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(SidebarTextX + 20.0f, Y),
 			FVector2D(180.0f, 18.0f), Legend[Index].Key, SmallFont, Ink);
 	}
 
-	DrawText(OutDrawElements, CurrentLayer++, FVector2D(MapOuterMargin, Size.Y - 28.0f),
+	DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, FVector2D(MapOuterMargin, Size.Y - 28.0f),
 		FVector2D(Size.X - MapOuterMargin * 2.0f, 20.0f),
 		TEXT("LMB  set waypoint     RMB  clear waypoint     Hover markers for details"),
 		SmallFont, Muted);
@@ -596,11 +614,11 @@ int32 UWorldDirectorMapWidget::NativePaint(
 		{
 			TooltipPosition.Y = HoveredScreenPosition.Y - TooltipSize.Y - 18.0f;
 		}
-		DrawBox(OutDrawElements, CurrentLayer++, FPaintGeometry(TooltipPosition, TooltipSize, 1.0f),
+		DrawBox(OutDrawElements, CurrentLayer++, AllottedGeometry, TooltipPosition, TooltipSize,
 			FLinearColor(0.02f, 0.03f, 0.03f, 0.96f));
-		DrawText(OutDrawElements, CurrentLayer++, TooltipPosition + FVector2D(10.0f, 8.0f),
+		DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, TooltipPosition + FVector2D(10.0f, 8.0f),
 			FVector2D(210.0f, 18.0f), DisplayNameForLocation(HoveredLocationId), BodyFont, Ink);
-		DrawText(OutDrawElements, CurrentLayer++, TooltipPosition + FVector2D(10.0f, 30.0f),
+		DrawText(OutDrawElements, CurrentLayer++, AllottedGeometry, TooltipPosition + FVector2D(10.0f, 30.0f),
 			FVector2D(210.0f, 16.0f), PurposeForLocation(HoveredLocationId), SmallFont, Gold);
 	}
 

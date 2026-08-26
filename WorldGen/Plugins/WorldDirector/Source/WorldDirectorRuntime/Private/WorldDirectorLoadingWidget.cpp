@@ -16,7 +16,7 @@
 #include "WorldDirectorSubsystems.h"
 #include "WorldDirectorTownActors.h"
 
-namespace
+namespace WorldDirectorLoadingWidgetPrivate
 {
 const FLinearColor TextPrimary(0.96f, 0.94f, 0.90f);
 const FLinearColor TextSecondary(0.69f, 0.71f, 0.72f);
@@ -61,6 +61,8 @@ UButton* AddButton(UWidgetTree* Tree, UVerticalBox* Layout, const FString& Label
 }
 }
 
+using namespace WorldDirectorLoadingWidgetPrivate;
+
 void UWorldDirectorLoadingWidget::InitializeForBootstrap(AWorldDirectorFixtureBootstrap* InBootstrap)
 {
 	Bootstrap = InBootstrap;
@@ -94,8 +96,6 @@ bool UWorldDirectorLoadingWidget::ApplyViewportLayout()
 	}
 	SetAnchorsInViewport(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
 	SetAlignmentInViewport(FVector2D::ZeroVector);
-	SetPositionInViewport(FVector2D::ZeroVector, false);
-	SetDesiredSizeInViewport(ViewportSize);
 	return true;
 }
 
