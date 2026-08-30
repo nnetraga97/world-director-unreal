@@ -1715,18 +1715,19 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 		const FBox CurrentBounds = Bounds->GetComponentsBoundingBox(true);
 		const FVector CurrentSize = CurrentBounds.GetSize();
 		const float DesiredXY = Plan.Terrain.ExtentCentimeters * 2.0f + 2400.0f;
+		const float MaximumAbsoluteTerrainHeight = FMath::Max(
+			FMath::Abs(static_cast<float>(Plan.Terrain.MinimumHeightCentimeters)),
+			FMath::Abs(static_cast<float>(Plan.Terrain.MaximumHeightCentimeters)));
+		// NavMeshBoundsVolume is a static brush in the playable map, so runtime
+		// SetActorLocation does not reliably move it. Size Z symmetrically around
+		// the map origin to cover both deep basins and high ridges instead.
 		const float DesiredZ = FMath::Max(4000.0f,
-			static_cast<float>(Plan.Terrain.MaximumHeightCentimeters -
-				Plan.Terrain.MinimumHeightCentimeters) + 4000.0f);
+			MaximumAbsoluteTerrainHeight * 2.0f + 4000.0f);
 		const FVector Scale = Bounds->GetActorScale3D();
 		Bounds->SetActorScale3D(Scale * FVector(
 			CurrentSize.X > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredXY / CurrentSize.X) : 1.0f,
 			CurrentSize.Y > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredXY / CurrentSize.Y) : 1.0f,
 			CurrentSize.Z > KINDA_SMALL_NUMBER ? FMath::Max(1.0f, DesiredZ / CurrentSize.Z) : 1.0f));
-		FVector BoundsCenter = GetActorLocation();
-		BoundsCenter.Z += (Plan.Terrain.MinimumHeightCentimeters +
-			Plan.Terrain.MaximumHeightCentimeters) * 0.5f;
-		Bounds->SetActorLocation(BoundsCenter, false, nullptr, ETeleportType::TeleportPhysics);
 		if (Navigation != nullptr)
 		{
 			Navigation->OnNavigationBoundsUpdated(Bounds);
@@ -2498,14 +2499,23 @@ void AWorldDirectorFixtureBootstrap::BeginPlay()
 			FCommandLine::Get(), TEXT("WorldDirectorExpectGenerationCancellation"));
 		Bridge->OnGenerationFinished.AddDynamic(
 			this, &AWorldDirectorFixtureBootstrap::HandleAutomatedGenerationFinished);
-		const FString Prompt = bAutomatedGenerationPrompted
+		FString Prompt = bAutomatedGenerationPrompted
 			? TEXT("A river frontier town held together by a mill, old debts, and a guarded civic secret.")
 			: FString();
+		FParse::Value(FCommandLine::Get(), TEXT("WorldDirectorGenerationPrompt="), Prompt);
+		int32 GenerationAutoTestSeed = bAutomatedGenerationPrompted ? 9182 : 4815;
+		FParse::Value(FCommandLine::Get(), TEXT("WorldDirectorGenerationSeed="), GenerationAutoTestSeed);
+		FString GenerationAutoTestModel = TEXT("gpt-5.6-luna");
+		FParse::Value(FCommandLine::Get(), TEXT("WorldDirectorGenerationModel="), GenerationAutoTestModel);
+		FString GenerationAutoTestReasoning = TEXT("high");
+		FParse::Value(
+			FCommandLine::Get(), TEXT("WorldDirectorGenerationReasoning="), GenerationAutoTestReasoning);
 		const bool bUseCliProvider = FParse::Param(
 			FCommandLine::Get(), TEXT("WorldDirectorUseCliProvider"));
 		const float Timeout = bAutomatedGenerationExpectsTimeout ? 1.0f : (bUseCliProvider ? 300.0f : 20.0f);
 		if (!Bridge->BeginWorldGeneration(
-			Prompt, bAutomatedGenerationPrompted ? 9182 : 4815, Timeout, !bUseCliProvider))
+			Prompt, GenerationAutoTestSeed, Timeout, !bUseCliProvider,
+			GenerationAutoTestModel, GenerationAutoTestReasoning))
 		{
 			UE_LOG(LogWorldDirector, Error, TEXT("WORLD_DIRECTOR_GENERATION_PLAYABLE_RESULT=FAIL reason=request_rejected"));
 			FGenericPlatformMisc::RequestExitWithStatus(true, 1);
@@ -3702,6 +3712,21 @@ void AWorldDirectorFixtureBootstrap::CancelAutomatedGeneration()
 
 void AWorldDirectorFixtureBootstrap::RunAutomatedGenerationViabilityCheck()
 {
+	if (UWorld* World = GetWorld(); World != nullptr &&
+		UNavigationSystemV1::IsNavigationBeingBuilt(World) &&
+		AutomatedGenerationNavigationRetryCount < 60)
+	{
+		++AutomatedGenerationNavigationRetryCount;
+		UE_LOG(LogWorldDirector, Display,
+			TEXT("WORLD_DIRECTOR_GENERATION_NAV_WAIT attempt=%d max=60 state=BUILDING"),
+			AutomatedGenerationNavigationRetryCount);
+		FTimerHandle TimerHandle;
+		GetWorldTimerManager().SetTimer(
+			TimerHandle, this,
+			&AWorldDirectorFixtureBootstrap::RunAutomatedGenerationViabilityCheck,
+			1.0f, false);
+		return;
+	}
 	const FValidationReport Report = CompiledTown
 		? CompiledTown->ValidateNavigationViability() : LastCompilationReport;
 	const int32 ResidentCount = CompiledTown ? CompiledTown->SpawnedResidents.Num() : 0;

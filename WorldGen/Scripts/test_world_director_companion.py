@@ -145,6 +145,29 @@ class CompanionContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one JSON object"):
             COMPANION.strict_json_loads("[]")
 
+    def test_provider_json_collapses_only_identical_duplicate_values(self) -> None:
+        response, changes = COMPANION.provider_json_loads(
+            '{"stage":"interpret","payload":{"brief":{"id":"same","id":"same"}}}'
+        )
+        self.assertEqual(response["payload"]["brief"]["id"], "same")
+        self.assertEqual(changes, ["Collapsed identical duplicate JSON key 'id'."])
+        with self.assertRaisesRegex(ValueError, "conflicting duplicate JSON key"):
+            COMPANION.provider_json_loads(
+                '{"stage":"interpret","stage":"repair"}'
+            )
+
+    def test_provider_json_removes_only_bounded_dangling_property_marker(self) -> None:
+        response, changes = COMPANION.provider_json_loads(
+            '{"stage":"interpret","payload":{"brief":{"id":"same","}}}'
+        )
+        self.assertEqual(response["payload"]["brief"]["id"], "same")
+        self.assertEqual(
+            changes,
+            ["Removed dangling quoted property marker before object close."],
+        )
+        with self.assertRaises(json.JSONDecodeError):
+            COMPANION.provider_json_loads('{"stage" "interpret"}')
+
     def test_layout_response_must_choose_one_supplied_candidate(self) -> None:
         request = request_for("layout")
         accepted = {

@@ -431,6 +431,7 @@ private:
 	bool bAutomatedGenerationPrompted = false;
 	bool bAutomatedGenerationExpectsTimeout = false;
 	bool bAutomatedGenerationExpectsCancellation = false;
+	int32 AutomatedGenerationNavigationRetryCount = 0;
 	bool bPlayerFlowAutoTest = false;
 	bool bPlayerFlowShouldRegenerate = false;
 	int32 PlayerFlowGenerationCount = 0;

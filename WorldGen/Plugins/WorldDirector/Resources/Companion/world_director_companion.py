@@ -180,6 +180,61 @@ def strict_json_loads(text: str) -> dict:
     return value
 
 
+def provider_json_loads(text: str) -> tuple[dict, list[str]]:
+    """Parse provider JSON while safely collapsing identical duplicate values.
+
+    Model providers occasionally repeat a field verbatim in an otherwise valid
+    object. Treating that as an ambiguous document forces a costly retry even
+    though either occurrence produces the same value. Conflicting duplicates
+    remain invalid and are never resolved by choosing one occurrence.
+    """
+    changes: list[str] = []
+
+    def collapse_identical_duplicate_keys(
+        pairs: list[tuple[str, object]],
+    ) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key not in result:
+                result[key] = value
+                continue
+            if result[key] != value:
+                raise ValueError(f"conflicting duplicate JSON key: {key}")
+            changes.append(f"Collapsed identical duplicate JSON key '{key}'.")
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-standard JSON number: {value}")
+
+    def parse(candidate: str) -> object:
+        return json.loads(
+            candidate,
+            object_pairs_hook=collapse_identical_duplicate_keys,
+            parse_constant=reject_constant,
+        )
+
+    try:
+        value = parse(text)
+    except json.JSONDecodeError as error:
+        # Recover one narrow provider typo: `,"}` after a complete value. The
+        # marker must be immediately before an object close and near the parser
+        # failure. The repaired document still has to pass the full stage schema.
+        search_start = max(0, error.pos - 64)
+        search_end = min(len(text), error.pos + 64)
+        marker_start = text.rfind(',"}', search_start, search_end)
+        if marker_start < 0:
+            raise
+        changes.clear()
+        value = parse(text[:marker_start] + text[marker_start + 2:])
+        changes.insert(
+            0,
+            "Removed dangling quoted property marker before object close.",
+        )
+    if not isinstance(value, dict):
+        raise ValueError("provider output must contain one JSON object")
+    return value, changes
+
+
 def _referenced_definitions(value: object) -> set[str]:
     names: set[str] = set()
     if isinstance(value, dict):
@@ -1806,10 +1861,15 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 raise ValueError(
                     f"response exceeds the {MAX_RESPONSE_BYTES}-byte local CLI budget"
                 )
-            response = strict_json_loads(strip_code_fence(raw_response))
+            response, parse_normalization_changes = provider_json_loads(
+                strip_code_fence(raw_response)
+            )
             record["parseSuccess"] = True
-            response, normalization_changes = normalize_and_validate_stage_response(
+            response, schema_normalization_changes = normalize_and_validate_stage_response(
                 request, response
+            )
+            normalization_changes = (
+                parse_normalization_changes + schema_normalization_changes
             )
             record["schemaSuccess"] = True
             record["normalizationChanges"] = normalization_changes
