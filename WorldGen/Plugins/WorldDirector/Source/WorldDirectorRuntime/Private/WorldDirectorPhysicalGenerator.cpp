@@ -2759,13 +2759,24 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 				continue;
 			}
 			const float UniformScale = DressingRandom.FRandRange(Asset->MinimumScale, Asset->MaximumScale);
+			FVector InstanceScale(UniformScale);
+			if (PlacementTag == TEXT("Dressing.Canopy"))
+			{
+				const float CanopyScaleX = DressingRandom.FRandRange(0.82f, 1.14f);
+				const float CanopyScaleY = DressingRandom.FRandRange(0.82f, 1.14f);
+				const float CanopyScaleZ = DressingRandom.FRandRange(0.88f, 1.28f);
+				InstanceScale = FVector(
+					UniformScale * CanopyScaleX,
+					UniformScale * CanopyScaleY,
+					UniformScale * CanopyScaleZ);
+			}
 			const float Pitch = PlacementTag == TEXT("Dressing.Rock") ? DressingRandom.FRandRange(-11.0f, 11.0f) : 0.0f;
 			const float Roll = PlacementTag == TEXT("Dressing.Rock") ? DressingRandom.FRandRange(-11.0f, 11.0f) : 0.0f;
 			FWorldDirectorDressingInstance& Instance = InOutPlan.Dressing.AddDefaulted_GetRef();
 			Instance.MeshAsset = Asset->MeshAsset;
 			Instance.Transform = FTransform(
 				FRotator(Pitch, DressingRandom.FRandRange(0.0f, 360.0f), Roll),
-				FVector(Position, Height), FVector(UniformScale));
+				FVector(Position, Height), InstanceScale);
 			Instance.BiomeTag = BiomeTag;
 			++Added;
 		}
@@ -2809,11 +2820,18 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 				continue;
 			}
 			const float Scale = DressingRandom.FRandRange(Asset->MinimumScale, Asset->MaximumScale);
+			const float TreeScaleX = DressingRandom.FRandRange(0.84f, 1.12f);
+			const float TreeScaleY = DressingRandom.FRandRange(0.84f, 1.12f);
+			const float TreeScaleZ = DressingRandom.FRandRange(0.9f, 1.24f);
+			const FVector TreeScale(
+				Scale * TreeScaleX,
+				Scale * TreeScaleY,
+				Scale * TreeScaleZ);
 			FWorldDirectorDressingInstance& Instance = InOutPlan.Dressing.AddDefaulted_GetRef();
 			Instance.MeshAsset = Asset->MeshAsset;
 			Instance.Transform = FTransform(
 				FRotator(0.0f, DressingRandom.FRandRange(0.0f, 360.0f), 0.0f),
-				FVector(Position, Height), FVector(Scale));
+				FVector(Position, Height), TreeScale);
 			Instance.BiomeTag = TEXT("Biome.SettlementGrove");
 			++AddedForDistrict;
 			++SettlementGroveCount;
@@ -3104,6 +3122,7 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 			AddStoryInstance(PlacementTag, LandmarkEntrance + ApproachAxis * Along - ApproachSide * Across, FacingYaw);
 		}
 	}
+	int32 DistrictGatheringSeatCount = 0;
 	for (int32 DistrictIndex = 1; DistrictIndex < InOutPlan.DistrictAnchors.Num(); ++DistrictIndex)
 	{
 		const FVector2D Anchor(InOutPlan.DistrictAnchors[DistrictIndex].Position);
@@ -3113,6 +3132,15 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 		const FName PlacementTag = ResolveStoryPlacementTag(Terrain.Archetype, DistrictIndex % 2 != 0);
 		AddStoryInstance(PlacementTag, Anchor + Side * 1150.0f, FacingYaw);
 		AddStoryInstance(PlacementTag, Anchor - Side * 1150.0f, FacingYaw);
+		// Give every ward a tiny social room at player scale. Paired seats facing
+		// inward make district anchors legible on foot and break the pattern of
+		// isolated buildings connected only by paths.
+		DistrictGatheringSeatCount += AddStoryInstance(
+			TEXT("Dressing.CivicSeat"), Anchor + Outward * 620.0f + Side * 720.0f,
+			FacingYaw - 35.0f);
+		DistrictGatheringSeatCount += AddStoryInstance(
+			TEXT("Dressing.CivicSeat"), Anchor + Outward * 620.0f - Side * 720.0f,
+			FacingYaw + 35.0f);
 	}
 	for (int32 DistrictIndex = 1;
 		DistrictIndex < InOutPlan.DistrictAnchors.Num() && CommunalFireCount == 0;
@@ -3189,9 +3217,9 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 		}
 	}
 	UE_LOG(LogWorldDirector, Display,
-		TEXT("WORLD_DIRECTOR_DRESSING_COMPOSITION settlementGroves=%d roadsideLamps=%d wayfinding=%d civicAnchors=%d civicSeats=%d guildBanners=%d farmTransport=%d homeUtility=%d innYard=%d communalFire=%d"),
+		TEXT("WORLD_DIRECTOR_DRESSING_COMPOSITION settlementGroves=%d roadsideLamps=%d wayfinding=%d civicAnchors=%d civicSeats=%d districtSeats=%d guildBanners=%d farmTransport=%d homeUtility=%d innYard=%d communalFire=%d"),
 		SettlementGroveCount, LampCount, WayfindingCount, CivicAnchorCount,
-		CivicSeatCount, GuildBannerCount, FarmTransportCount, HomeUtilityCount,
+		CivicSeatCount, DistrictGatheringSeatCount, GuildBannerCount, FarmTransportCount, HomeUtilityCount,
 		InnYardCount, CommunalFireCount);
 
 	TArray<uint8> LayoutBytes;

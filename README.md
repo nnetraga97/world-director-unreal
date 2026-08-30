@@ -13,20 +13,21 @@ Player prompt
   -> runtime town and simulation
 ```
 
-The model determines meaning—identity, history, population, relationships, beliefs, tensions, and proposed changes. Unreal owns terrain, exact placement, assets, collision, navigation, schedules, validation, and actual outcomes.
+The model is concentrated where it creates visible value: place identity, landscape intent, history, tension, and town topology. Unreal owns terrain, exact placement, assets, collision, navigation, validation, and actual outcomes. Population, relationships, beliefs, schedules, and the compatibility change project remain available, but are synthesized and repaired locally after the physical world decisions so they stay off the model-critical path.
 
 ## Current functionality
 
 - Player-facing **Create World** flow with model and reasoning-effort selection.
 - Asynchronous local CLI companion with cancellation, per-stage timeouts, and teardown-safe callbacks.
-- Staged interpretation, topology, layout selection, population, integration, repair, and runtime compilation.
+- Two creative model stages (interpretation and topology), followed by deterministic layout selection, local population compatibility synthesis, integration, bounded repair, and runtime compilation.
 - Seeded V3 physical generation across a 1.2 km domain: composable macroforms, thermal erosion, connected water, terrain-aware districts and plots, graded routes, coherent farms, and layered biome dressing.
 - One continuous runtime terrain mesh with smooth normals, collision, and a project-owned four-layer grass/gravel/farm/rock material driven by deterministic vertex-color masks.
 - Seed-specific settlement morphologies, landmark approaches, terrain affinities, and environmental-story clusters that make physical layout reflect the generated world premise.
-- Town population with homes, occupations, schedules, relationships, beliefs, memories, and lightweight dialogue.
+- A non-blocking compatibility population with homes, occupations, schedules, relationships, beliefs, memories, and lightweight dialogue.
 - Deterministic simulation that continues without a connected model.
 - Location-repurposing projects validated and executed by Unreal.
-- AI diagnostics for requests, prompts, raw responses, provider events, token/cost telemetry, validation repairs, physical recipes, and candidate fingerprints.
+- Provider-neutral stage envelopes with bounded requests/responses, strict retry normalization, cross-platform process-tree cancellation, stdout-or-file response transport, and portable JSON artifacts suitable for a future sandboxed agent SDK.
+- AI diagnostics for requests, prompts, per-attempt raw responses, provider events, token/cost telemetry, normalization, validation repairs, physical recipes, and candidate fingerprints.
 - Director inspection for world facts, relationships, ownership, simulation state, and project consequences.
 
 ## Repository layout

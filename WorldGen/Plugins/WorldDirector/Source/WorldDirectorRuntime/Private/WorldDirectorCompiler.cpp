@@ -40,7 +40,10 @@ const FBuildingCapability BuildingCapabilities[] = {
 enum class EBuildingCapabilityIndex : uint8
 {
 	HomeCompact = 0,
+	HomeCompactDeep = 1,
+	HomeTall = 2,
 	HomeMultiwing = 3,
+	HomeTallBroad = 4,
 	WorkplaceLonghouse = 5,
 	WorkplaceInn = 6,
 	WorkplaceGuildhall = 7
@@ -48,7 +51,10 @@ enum class EBuildingCapabilityIndex : uint8
 
 const int32 CertifiedHomeCapabilityIndices[] = {
 	static_cast<int32>(EBuildingCapabilityIndex::HomeCompact),
-	static_cast<int32>(EBuildingCapabilityIndex::HomeMultiwing)
+	static_cast<int32>(EBuildingCapabilityIndex::HomeCompactDeep),
+	static_cast<int32>(EBuildingCapabilityIndex::HomeTall),
+	static_cast<int32>(EBuildingCapabilityIndex::HomeMultiwing),
+	static_cast<int32>(EBuildingCapabilityIndex::HomeTallBroad)
 };
 
 const FCharacterFamily MaleCharacterFamilies[] = {

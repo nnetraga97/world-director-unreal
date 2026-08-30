@@ -84,8 +84,6 @@ void AddFeature(UWidgetTree* Tree, UHorizontalBox* Row, const FString& Title, co
 }
 }
 
-using namespace WorldDirectorLandingWidgetPrivate;
-
 void UWorldDirectorLandingWidget::InitializeForBootstrap(AWorldDirectorFixtureBootstrap* InBootstrap)
 {
 	Bootstrap = InBootstrap;
@@ -180,31 +178,31 @@ void UWorldDirectorLandingWidget::BuildWidgetTree()
 
 	UVerticalBox* Layout = WidgetTree->ConstructWidget<UVerticalBox>();
 	Frame->SetContent(Layout);
-	AddText(WidgetTree, Layout, TEXT("WORLD DIRECTOR  /  RUNTIME WORLD LAB"), 12, AccentAmber);
-	AddText(WidgetTree, Layout, TEXT("Make a world worth returning to."), 38, TextPrimary,
+	WorldDirectorLandingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("WORLD DIRECTOR  /  RUNTIME WORLD LAB"), 12, WorldDirectorLandingWidgetPrivate::AccentAmber);
+	WorldDirectorLandingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("Make a world worth returning to."), 38, WorldDirectorLandingWidgetPrivate::TextPrimary,
 		FMargin(0.0f, 10.0f, 0.0f, 0.0f));
-	AddText(WidgetTree, Layout,
+	WorldDirectorLandingWidgetPrivate::AddText(WidgetTree, Layout,
 		TEXT("Describe a place with a history. The director turns it into a living town where people, routines, and change continue after the world is built."),
-		16, TextSecondary, FMargin(0.0f, 10.0f, 0.0f, 28.0f));
+		16, WorldDirectorLandingWidgetPrivate::TextSecondary, FMargin(0.0f, 10.0f, 0.0f, 28.0f));
 
 	UHorizontalBox* Features = WidgetTree->ConstructWidget<UHorizontalBox>();
 	Layout->AddChildToVerticalBox(Features);
-	AddFeature(WidgetTree, Features, TEXT("DIRECT THE PREMISE"), TEXT("Start with a brief, a seed, or an empty page."));
-	AddFeature(WidgetTree, Features, TEXT("WATCH IT TAKE SHAPE"), TEXT("Follow interpretation, layout, population, and validation."));
-	AddFeature(WidgetTree, Features, TEXT("STEP INTO THE RESULT"), TEXT("Explore a town whose simulation runs without the model."));
+	WorldDirectorLandingWidgetPrivate::AddFeature(WidgetTree, Features, TEXT("DIRECT THE PREMISE"), TEXT("Start with a brief, a seed, or an empty page."));
+	WorldDirectorLandingWidgetPrivate::AddFeature(WidgetTree, Features, TEXT("WATCH IT TAKE SHAPE"), TEXT("Follow interpretation, layout, population, and validation."));
+	WorldDirectorLandingWidgetPrivate::AddFeature(WidgetTree, Features, TEXT("STEP INTO THE RESULT"), TEXT("Explore a town whose simulation runs without the model."));
 
-	AddText(WidgetTree, Layout, TEXT("CHOOSE YOUR STARTING POINT"), 12, TextMuted,
+	WorldDirectorLandingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("CHOOSE YOUR STARTING POINT"), 12, WorldDirectorLandingWidgetPrivate::TextMuted,
 		FMargin(0.0f, 30.0f, 0.0f, 10.0f));
 	UHorizontalBox* Actions = WidgetTree->ConstructWidget<UHorizontalBox>();
 	Layout->AddChildToVerticalBox(Actions);
-	NewWorldButton = MakeActionButton(WidgetTree, Actions, TEXT("CREATE A NEW WORLD"), FLinearColor(0.42f, 0.27f, 0.09f, 1.0f));
+	NewWorldButton = WorldDirectorLandingWidgetPrivate::MakeActionButton(WidgetTree, Actions, TEXT("CREATE A NEW WORLD"), FLinearColor(0.42f, 0.27f, 0.09f, 1.0f));
 	NewWorldButton->SetToolTipText(FText::FromString(TEXT("Open the world brief and generation settings.")));
 	NewWorldButton->OnClicked.AddDynamic(this, &UWorldDirectorLandingWidget::StartNewWorld);
-	SampleWorldButton = MakeActionButton(WidgetTree, Actions, TEXT("ENTER THE DEMO TOWN"), FLinearColor(0.10f, 0.25f, 0.34f, 1.0f));
+	SampleWorldButton = WorldDirectorLandingWidgetPrivate::MakeActionButton(WidgetTree, Actions, TEXT("ENTER THE DEMO TOWN"), FLinearColor(0.10f, 0.25f, 0.34f, 1.0f));
 	SampleWorldButton->SetToolTipText(FText::FromString(TEXT("Load the offline certified town fixture without an AI call.")));
 	SampleWorldButton->OnClicked.AddDynamic(this, &UWorldDirectorLandingWidget::ExploreSampleWorld);
 
-	AddText(WidgetTree, Layout, TEXT("RETURN TO A CREATED WORLD"), 12, TextMuted,
+	WorldDirectorLandingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("RETURN TO A CREATED WORLD"), 12, WorldDirectorLandingWidgetPrivate::TextMuted,
 		FMargin(0.0f, 28.0f, 0.0f, 10.0f));
 	SavedWorldPicker = WidgetTree->ConstructWidget<UComboBoxString>();
 	SavedWorldPicker->SetToolTipText(FText::FromString(
@@ -215,16 +213,16 @@ void UWorldDirectorLandingWidget::BuildWidgetTree()
 	}
 	UHorizontalBox* SavedWorldActions = WidgetTree->ConstructWidget<UHorizontalBox>();
 	Layout->AddChildToVerticalBox(SavedWorldActions);
-	LoadWorldButton = MakeActionButton(
+	LoadWorldButton = WorldDirectorLandingWidgetPrivate::MakeActionButton(
 		WidgetTree, SavedWorldActions, TEXT("LOAD SELECTED WORLD"), FLinearColor(0.18f, 0.31f, 0.22f, 1.0f));
 	LoadWorldButton->SetToolTipText(FText::FromString(TEXT("Rebuild the selected completed world.")));
 	LoadWorldButton->OnClicked.AddDynamic(this, &UWorldDirectorLandingWidget::LoadSelectedWorld);
-	SavedWorldStatusText = AddText(WidgetTree, Layout, TEXT("Looking for completed worlds..."), 11, TextMuted,
+	SavedWorldStatusText = WorldDirectorLandingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("Looking for completed worlds..."), 11, WorldDirectorLandingWidgetPrivate::TextMuted,
 		FMargin(0.0f, 2.0f, 0.0f, 0.0f));
 
-	AddText(WidgetTree, Layout,
+	WorldDirectorLandingWidgetPrivate::AddText(WidgetTree, Layout,
 		TEXT("N  world builder    F8  AI diagnostics    Tab  interaction cursor"),
-		11, TextMuted, FMargin(0.0f, 30.0f, 0.0f, 0.0f));
+		11, WorldDirectorLandingWidgetPrivate::TextMuted, FMargin(0.0f, 30.0f, 0.0f, 0.0f));
 }
 
 FReply UWorldDirectorLandingWidget::NativeOnPreviewKeyDown(

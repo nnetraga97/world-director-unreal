@@ -26,6 +26,7 @@ MAX_REQUEST_BYTES = 32_000
 MAX_RESPONSE_BYTES = 64_000
 MAX_VALIDATION_MESSAGE_CHARS = 512
 DEFAULT_COMPANION_TIMEOUT_SECONDS = 360.0
+DEFAULT_PROVIDER_ATTEMPTS = 2
 
 POPULATION_MIN_ITEMS = {
     "residents": 20,
@@ -33,6 +34,17 @@ POPULATION_MIN_ITEMS = {
     "relationships": 1,
     "beliefs": 1,
     "changeProjects": 1,
+}
+
+STAGE_ARRAY_BOUNDS = {
+    ("topology", "locations"): (12, 18),
+    ("topology", "facts"): (1, None),
+    ("topology", "threats"): (1, None),
+    ("population", "residents"): (20, 30),
+    ("population", "households"): (1, 6),
+    ("population", "relationships"): (1, None),
+    ("population", "beliefs"): (1, None),
+    ("population", "changeProjects"): (1, 1),
 }
 
 REPAIR_SECTION_DEFINITIONS = {
@@ -54,7 +66,7 @@ _ACTIVE_TELEMETRY_PATH: Path | None = None
 
 
 def _terminate_process_tree(process: subprocess.Popen[str], force: bool = False) -> None:
-    """Terminate the CLI and its process group on POSIX hosts."""
+    """Terminate the CLI and its process tree on supported desktop hosts."""
     if process.poll() is not None:
         return
     if os.name == "posix":
@@ -64,6 +76,15 @@ def _terminate_process_tree(process: subprocess.Popen[str], force: bool = False)
         except ProcessLookupError:
             return
         except OSError:
+            pass
+    elif os.name == "nt":
+        try:
+            command = ["taskkill", "/PID", str(process.pid), "/T"]
+            if force:
+                command.append("/F")
+            subprocess.run(command, capture_output=True, check=False, timeout=5.0)
+            return
+        except (OSError, subprocess.SubprocessError):
             pass
     try:
         process.kill() if force else process.terminate()
@@ -182,6 +203,13 @@ def _repair_schema_for_target(target: dict, canonical_defs: dict) -> dict:
     if wire_type == "array":
         item_schema = {"$ref": f"#/$defs/{definition}"}
         value_schema = {"type": "array", "items": item_schema}
+        bounds = STAGE_ARRAY_BOUNDS.get(("population", section))
+        if bounds:
+            minimum, maximum = bounds
+            if minimum is not None:
+                value_schema["minItems"] = minimum
+            if maximum is not None:
+                value_schema["maxItems"] = maximum
     else:
         value_schema = {"$ref": f"#/$defs/{definition}"}
     properties = {
@@ -223,8 +251,13 @@ def stage_response_schema(request: dict) -> dict:
             field_schema = {"$ref": f"#/$defs/{definition}"}
             if wire_type == "array":
                 field_schema = {"type": "array", "items": field_schema}
-                if stage == "population" and field in POPULATION_MIN_ITEMS:
-                    field_schema["minItems"] = POPULATION_MIN_ITEMS[field]
+                bounds = STAGE_ARRAY_BOUNDS.get((stage, field))
+                if bounds:
+                    minimum, maximum = bounds
+                    if minimum is not None:
+                        field_schema["minItems"] = minimum
+                    if maximum is not None:
+                        field_schema["maxItems"] = maximum
         elif stage == "layout":
             candidate_ids = [
                 item.get("opaqueId")
@@ -385,6 +418,8 @@ def _validate_schema_value(
     if isinstance(value, list):
         if "minItems" in schema and len(value) < int(schema["minItems"]):
             raise ValueError(f"{path}: array has too few items")
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            raise ValueError(f"{path}: array has too many items")
         if schema.get("uniqueItems"):
             fingerprints = {json.dumps(item, sort_keys=True, separators=(",", ":")) for item in value}
             if len(fingerprints) != len(value):
@@ -455,6 +490,16 @@ def fixture_response(request: dict) -> dict:
             response["payload"]["residents"][0]["homeLocationId"] = "location.missing"
         return response
     if stage == "repair":
+        if request.get("populationBundleRepair"):
+            return {
+                "stage": stage,
+                "payload": {
+                    "replacements": [
+                        {"section": section, "value": copy.deepcopy(fixture[section])}
+                        for section in STAGE_KEYS["population"]
+                    ]
+                },
+            }
         replacements = []
         seen = set()
         for issue in request.get("validationIssues", []):
@@ -523,11 +568,42 @@ def build_agent_prompt(request: dict) -> str:
             "belief object for each referenced beliefId. The supplied facts array is closed and "
             "authoritative: never use a threat ID as a factId or belief ID."
         )
+        if stage == "population":
+            population_rule += (
+                " Every nonempty ownerResidentId and controllerResidentId in the supplied "
+                "locations must exactly match a generated resident ID. Household membership, "
+                "resident householdId/homeLocationId, and home residentCapacity must agree. "
+                "Prefer a compact connected relationship graph; do not emit redundant edges."
+            )
+    topology_rule = ""
+    interpretation_rule = ""
+    if stage == "interpret":
+        interpretation_rule = (
+            "Commit to one strong landscape identity: river valley, broken ridge, storm coast, "
+            "reed marsh, or sheltered basin. Make terrainPreferences concrete enough to drive "
+            "landform, water, settlement morphology, sightlines, and cultivated ground; avoid "
+            "generic lists that request every biome. Give the place a memorable proper identity "
+            "and make its economy and central pressure visibly legible in the environment."
+        )
+    if stage == "topology":
+        topology_rule = (
+            "Generate 12-18 unique locations with one to six homes whose combined residentCapacity "
+            "supports 30 residents. Every edge, landmark, and threat location reference must use "
+            "one of those location IDs. Include at least one repurposable Home, Workplace, Shelter, "
+            "or Headquarters for the later change project. Use two to four districts with distinct "
+            "physical identities. Compose a readable town: one landmark terminates a deliberate "
+            "civic approach; workplaces and public anchors form a compact center; homes gather in "
+            "recognizable wards; one cultivated or transport edge connects the town to its terrain. "
+            "Keep the edge graph connected and hierarchical, with a civic spine and local branches "
+            "instead of a dense mesh. Location names and purposes must make these visual roles clear."
+        )
     return f"""
 You are the World Director semantic generator. Complete only stage '{stage}'.
 {blank_rule}
 {repair_rule}
 {population_rule}
+{interpretation_rule}
+{topology_rule}
 Never emit Unreal asset paths, transforms, coordinates, commentary, markdown, or questions.
 Return exactly one strict JSON object. Do not add keys outside this response schema and do not
 emit duplicate keys, NaN, or Infinity. The following is only an outer-envelope example; populate
@@ -602,6 +678,11 @@ def compact_current_context(request: dict) -> dict:
             if key in current:
                 compact[key] = copy.deepcopy(current[key])
     if stage == "repair":
+        if request.get("populationBundleRepair"):
+            for key in ("brief", "topology", "locations", "facts", "threats"):
+                if key in current:
+                    compact[key] = copy.deepcopy(current[key])
+            return compact
         targets = [
             target
             for target in request.get("repairTargets", [])
@@ -750,6 +831,791 @@ def validate_stage_response(request: dict, response: dict) -> dict:
     return response
 
 
+def _supported_tags(request: dict) -> set[str]:
+    summary = request.get("capabilitySummary", {})
+    if not isinstance(summary, dict):
+        return set()
+    tags: set[str] = set()
+    for key, value in summary.items():
+        if key == "supportedTags" or key.startswith("supported"):
+            if isinstance(value, list):
+                tags.update(item for item in value if isinstance(item, str))
+    return tags
+
+
+def _unique_strings(values: object, allowed: set[str] | None = None) -> list[str]:
+    result: list[str] = []
+    for value in values if isinstance(values, list) else []:
+        if not isinstance(value, str) or not value or value in result:
+            continue
+        if allowed is not None and value not in allowed:
+            continue
+        result.append(value)
+    return result
+
+
+def _clamp(value: object, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = minimum
+    if number != number or number in {float("inf"), float("-inf")}:
+        number = minimum
+    return max(minimum, min(maximum, number))
+
+
+def _stable_id(value: object, fallback: str) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", text):
+        return text
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
+    if cleaned and cleaned[0].isalnum():
+        return cleaned
+    return fallback
+
+
+def _replace_exact_string(value: object, old: str, new: str) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if child == old:
+                value[key] = new
+            else:
+                _replace_exact_string(child, old, new)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            if child == old:
+                value[index] = new
+            else:
+                _replace_exact_string(child, old, new)
+
+
+def normalize_topology_response(request: dict, response: dict) -> list[str]:
+    """Apply only deterministic capability invariants before later stages consume topology."""
+    if request.get("stage") != "topology":
+        return []
+    payload = response["payload"]
+    locations = payload["locations"]
+    changes: list[str] = []
+    topology = payload["topology"]
+    districts = _unique_strings(topology.get("districts", []))
+    if len(districts) > 4:
+        districts = districts[:4]
+        changes.append("focused the settlement into four physically distinct districts")
+    while len(districts) < 2:
+        districts.append(f"district.{len(districts) + 1}")
+        changes.append("added a district anchor for readable settlement composition")
+    topology["districts"] = districts
+    for index, location in enumerate(locations):
+        for field in ("ownerResidentId", "controllerResidentId"):
+            value = location.get(field, "")
+            if value:
+                stable = _stable_id(value, f"resident.authority.{index + 1}")
+                if stable != value:
+                    location[field] = stable
+                    changes.append(f"normalized an unstable {field} on {location.get('id', index)}")
+        if not location.get("ownerResidentId") and not location.get("controllerResidentId"):
+            location["controllerResidentId"] = f"resident.authority.{index + 1}"
+            changes.append(f"assigned deterministic authority to {location.get('id', index)}")
+
+    # A topology can name two authorities per location, while the population contract is
+    # intentionally capped at 30 residents. Collapse overflow identities here, before the
+    # creative topology is accepted, so local population synthesis always has a solution.
+    retained_authorities: list[str] = []
+    overflow_authorities: dict[str, str] = {}
+    for location in locations:
+        for field in ("ownerResidentId", "controllerResidentId"):
+            authority = location.get(field, "")
+            if not authority or authority in retained_authorities:
+                continue
+            if authority in overflow_authorities:
+                location[field] = overflow_authorities[authority]
+                continue
+            if len(retained_authorities) < 30:
+                retained_authorities.append(authority)
+                continue
+            replacement = retained_authorities[len(overflow_authorities) % len(retained_authorities)]
+            overflow_authorities[authority] = replacement
+            location[field] = replacement
+    if overflow_authorities:
+        changes.append(
+            f"consolidated {len(overflow_authorities)} overflow authority identities "
+            "into the 30-resident population limit"
+        )
+    homes = [item for item in locations if item.get("purposeTag") == "Purpose.Home"]
+    if homes:
+        capacity = sum(max(0, int(item.get("residentCapacity", 0))) for item in homes)
+        missing = max(0, 30 - capacity)
+        for offset in range(missing):
+            home = homes[offset % len(homes)]
+            home["residentCapacity"] = max(0, int(home.get("residentCapacity", 0))) + 1
+        if missing:
+            changes.append(f"expanded certified home capacity by {missing} to support 30 residents")
+    conversions = {"Purpose.Home", "Purpose.Workplace", "Purpose.Shelter", "Purpose.Headquarters"}
+    if not any(item.get("bRepurposable") and item.get("purposeTag") in conversions for item in locations):
+        candidate = next((item for item in locations if item.get("purposeTag") in conversions), None)
+        if candidate is not None:
+            candidate["bRepurposable"] = True
+            changes.append(f"made {candidate.get('id', 'one location')} eligible for the required change project")
+    return changes
+
+
+def validate_topology_semantics(request: dict, response: dict) -> None:
+    if request.get("stage") != "topology":
+        return
+    payload = response["payload"]
+    locations = payload["locations"]
+    location_ids = [item.get("id") for item in locations]
+    if len(set(location_ids)) != len(location_ids):
+        raise ValueError("topology location IDs must be unique")
+    home_count = sum(item.get("purposeTag") == "Purpose.Home" for item in locations)
+    if not 1 <= home_count <= 6:
+        raise ValueError("topology requires one to six home locations")
+    if sum(int(item.get("residentCapacity", 0)) for item in locations if item.get("purposeTag") == "Purpose.Home") < 30:
+        raise ValueError("topology home capacity cannot support the permitted population")
+    valid_locations = set(location_ids)
+    topology = payload["topology"]
+    district_count = len(topology.get("districts", []))
+    if not 2 <= district_count <= 4:
+        raise ValueError("topology requires two to four focused districts")
+    for edge in topology.get("edges", []):
+        if edge.get("fromLocationId") not in valid_locations or edge.get("toLocationId") not in valid_locations:
+            raise ValueError("topology edge references an unknown location")
+    if any(item not in valid_locations for item in topology.get("landmarkLocationIds", [])):
+        raise ValueError("topology landmark references an unknown location")
+    for threat in payload["threats"]:
+        if any(item not in valid_locations for item in threat.get("affectedLocationIds", [])):
+            raise ValueError("topology threat references an unknown location")
+    if not any(item.get("bRepurposable") for item in locations):
+        raise ValueError("topology has no location eligible for the required change project")
+
+
+def normalize_population_response(request: dict, response: dict) -> list[str]:
+    """Repair cross-object invariants without asking a model to rewrite an entire social graph."""
+    if request.get("stage") != "population":
+        return []
+    payload = response["payload"]
+    current = request.get("current", {})
+    locations = current.get("locations", []) if isinstance(current, dict) else []
+    facts = current.get("facts", []) if isinstance(current, dict) else []
+    residents = payload["residents"]
+    changes: list[str] = []
+    location_by_id = {
+        item.get("id"): item for item in locations
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    fact_by_id = {
+        item.get("id"): item for item in facts
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if not location_by_id or not fact_by_id:
+        raise ValueError("population normalization requires accepted locations and facts")
+    resident_ids = [item.get("id") for item in residents]
+    if len(set(resident_ids)) != len(resident_ids):
+        raise ValueError("population resident IDs must be unique")
+
+    # Topology names authority before the population exists. Preserve those stable IDs by
+    # renaming otherwise-unreserved residents and updating the entire population bundle.
+    authority_ids = _unique_strings([
+        authority
+        for location in locations
+        for authority in (location.get("ownerResidentId"), location.get("controllerResidentId"))
+        if isinstance(authority, str) and authority
+    ])
+    for authority_id in authority_ids:
+        if authority_id in resident_ids:
+            continue
+        candidate = next((item for item in residents if item.get("id") not in authority_ids), None)
+        if candidate is None:
+            raise ValueError(f"population cannot preserve topology authority ID {authority_id!r}")
+        old_id = candidate["id"]
+        candidate["id"] = authority_id
+        _replace_exact_string(payload, old_id, authority_id)
+        resident_ids[resident_ids.index(old_id)] = authority_id
+        changes.append(f"preserved topology authority {authority_id} by remapping {old_id}")
+
+    valid_residents = set(resident_ids)
+    valid_locations = set(location_by_id)
+    valid_facts = set(fact_by_id)
+    first_fact = next(iter(fact_by_id))
+    supported = _supported_tags(request)
+
+    homes = [item for item in locations if item.get("purposeTag") == "Purpose.Home"]
+    if not homes:
+        raise ValueError("population cannot be assigned because topology has no home")
+    remaining = {item["id"]: max(0, int(item.get("residentCapacity", 0))) for item in homes}
+    assigned_home: dict[str, str] = {}
+    for resident in residents:
+        preferred = resident.get("homeLocationId")
+        home_id = preferred if preferred in remaining and remaining[preferred] > 0 else next(
+            (item["id"] for item in homes if remaining[item["id"]] > 0), ""
+        )
+        if not home_id:
+            raise ValueError("topology home capacity is smaller than the generated population")
+        remaining[home_id] -= 1
+        assigned_home[resident["id"]] = home_id
+        resident["homeLocationId"] = home_id
+        if resident.get("currentLocationId") not in valid_locations:
+            resident["currentLocationId"] = home_id
+            changes.append(f"moved {resident['id']} from an unknown current location to home")
+        if resident.get("bEmployed"):
+            if resident.get("workplaceLocationId") not in valid_locations:
+                workplace = next(
+                    (item["id"] for item in locations if item.get("purposeTag") == "Purpose.Workplace"),
+                    home_id,
+                )
+                resident["workplaceLocationId"] = workplace
+                changes.append(f"assigned {resident['id']} to a valid workplace")
+            if supported and resident.get("occupationTag") not in supported:
+                occupation = next((tag for tag in supported if tag.startswith("Occupation.")), "")
+                if occupation:
+                    resident["occupationTag"] = occupation
+                    changes.append(f"mapped {resident['id']} to a supported occupation")
+        else:
+            resident["workplaceLocationId"] = ""
+        memories = resident.get("importantMemories", [])
+        if not memories:
+            memories.append({
+                "id": f"memory.generated.{resident['id']}",
+                "factId": first_fact,
+                "summary": "Remembers how the settlement's shared danger changed daily life.",
+                "day": 0,
+                "emotionalSignificance": 0.65,
+            })
+            changes.append(f"seeded a grounded memory for {resident['id']}")
+        for memory in memories:
+            if memory.get("factId") not in valid_facts:
+                memory["factId"] = first_fact
+                changes.append(f"grounded an invalid memory fact for {resident['id']}")
+            memory["day"] = max(0, int(memory.get("day", 0)))
+            memory["emotionalSignificance"] = _clamp(memory.get("emotionalSignificance", 0.5))
+
+    # Rebuild household membership from the already-authored resident/home choices. This is
+    # lossless for character identity and avoids asking a model to synchronize three indexes.
+    household_by_home = {
+        item.get("homeLocationId"): item for item in payload["households"]
+        if isinstance(item, dict) and item.get("homeLocationId") in remaining
+    }
+    rebuilt_households = []
+    used_household_ids: set[str] = set()
+    for home in homes:
+        members = [resident_id for resident_id, home_id in assigned_home.items() if home_id == home["id"]]
+        if not members:
+            continue
+        household = copy.deepcopy(household_by_home.get(home["id"], {}))
+        candidate_id = household.get("id")
+        if not isinstance(candidate_id, str) or not candidate_id or candidate_id in used_household_ids:
+            candidate_id = f"household.generated.{len(rebuilt_households) + 1}"
+        used_household_ids.add(candidate_id)
+        household.update({
+            "version": 1,
+            "id": candidate_id,
+            "homeLocationId": home["id"],
+            "memberResidentIds": members,
+        })
+        rebuilt_households.append(household)
+        for resident in residents:
+            if resident["id"] in members:
+                resident["householdId"] = candidate_id
+    if rebuilt_households != payload["households"]:
+        payload["households"] = rebuilt_households
+        changes.append("reconciled household membership, homes, and capacities")
+
+    # Normalize beliefs to the closed fact and resident sets, then guarantee every resident has
+    # one held belief. Invalid provider references become visible telemetry rather than repairs.
+    beliefs = []
+    belief_ids: set[str] = set()
+    for belief in payload["beliefs"]:
+        belief_id = belief.get("id")
+        if not isinstance(belief_id, str) or not belief_id or belief_id in belief_ids:
+            continue
+        holder = belief.get("holderResidentId")
+        if holder not in valid_residents:
+            continue
+        belief["factId"] = belief.get("factId") if belief.get("factId") in valid_facts else first_fact
+        if belief.get("sourceResidentId") not in valid_residents:
+            belief["sourceResidentId"] = ""
+        for field in ("confidence", "secrecy", "emotionalSignificance", "willingnessToShare"):
+            belief[field] = _clamp(belief.get(field, 0.5))
+        belief_ids.add(belief_id)
+        beliefs.append(belief)
+    for resident in residents:
+        held = [item["id"] for item in beliefs if item["holderResidentId"] == resident["id"]]
+        if not held:
+            belief_id = f"belief.generated.{resident['id']}"
+            belief = {
+                "version": 1,
+                "id": belief_id,
+                "holderResidentId": resident["id"],
+                "factId": first_fact,
+                "confidence": 0.72,
+                "bImportantSecret": False,
+                "sourceResidentId": "",
+                "secrecy": 0.2,
+                "emotionalSignificance": 0.6,
+                "willingnessToShare": 0.65,
+            }
+            beliefs.append(belief)
+            belief_ids.add(belief_id)
+            held = [belief_id]
+            changes.append(f"seeded a fact-grounded belief for {resident['id']}")
+        resident["beliefIds"] = held
+    secret_holder_index = 0
+    for fact in fact_by_id.values():
+        if fact.get("bSecret") and not any(item["factId"] == fact["id"] for item in beliefs):
+            holder = residents[secret_holder_index % len(residents)]
+            belief_id = f"belief.generated.secret.{len(beliefs) + 1}"
+            while belief_id in belief_ids:
+                belief_id += ".next"
+            beliefs.append({
+                "version": 1,
+                "id": belief_id,
+                "holderResidentId": holder["id"],
+                "factId": fact["id"],
+                "confidence": 0.72,
+                "bImportantSecret": bool(fact.get("bEstablished")),
+                "sourceResidentId": "",
+                "secrecy": 0.78,
+                "emotionalSignificance": 0.65,
+                "willingnessToShare": 0.22,
+            })
+            belief_ids.add(belief_id)
+            holder["beliefIds"].append(belief_id)
+            secret_holder_index += 1
+            changes.append(f"assigned secret fact {fact['id']} to a distinct resident belief")
+    payload["beliefs"] = beliefs
+
+    # Keep valid authored relationships, downgrade broken reciprocal claims, and add a small
+    # deterministic ring. The ring guarantees a connected social graph without replacing prose.
+    relationships = []
+    relationship_ids: set[str] = set()
+    for relationship in payload["relationships"]:
+        relationship_id = relationship.get("id")
+        source = relationship.get("sourceResidentId")
+        target = relationship.get("targetResidentId")
+        if (not isinstance(relationship_id, str) or not relationship_id or
+                relationship_id in relationship_ids or source not in valid_residents or
+                target not in valid_residents or source == target):
+            continue
+        for field in ("trust", "affinity", "fear", "obligation"):
+            relationship[field] = _clamp(relationship.get(field, 0.5))
+        relationship_ids.add(relationship_id)
+        relationships.append(relationship)
+    by_id = {item["id"]: item for item in relationships}
+    for relationship in relationships:
+        reciprocal = by_id.get(relationship.get("reciprocalRelationshipId"))
+        if relationship.get("bBidirectional") and not (
+            reciprocal
+            and reciprocal.get("sourceResidentId") == relationship.get("targetResidentId")
+            and reciprocal.get("targetResidentId") == relationship.get("sourceResidentId")
+            and reciprocal.get("relationshipType") == relationship.get("relationshipType")
+            and reciprocal.get("reciprocalRelationshipId") == relationship.get("id")
+        ):
+            relationship["bBidirectional"] = False
+            relationship["reciprocalRelationshipId"] = ""
+            changes.append(f"removed an invalid reciprocal claim from {relationship['id']}")
+    adjacency = {resident_id: set() for resident_id in resident_ids}
+    for relationship in relationships:
+        adjacency[relationship["sourceResidentId"]].add(relationship["targetResidentId"])
+        adjacency[relationship["targetResidentId"]].add(relationship["sourceResidentId"])
+    components: list[list[str]] = []
+    unseen = set(resident_ids)
+    while unseen:
+        start = next(item for item in resident_ids if item in unseen)
+        component: list[str] = []
+        pending = [start]
+        while pending:
+            resident_id = pending.pop()
+            if resident_id not in unseen:
+                continue
+            unseen.remove(resident_id)
+            component.append(resident_id)
+            pending.extend(adjacency[resident_id] & unseen)
+        components.append(component)
+    for index in range(len(components) - 1):
+        source = components[index][0]
+        target = components[index + 1][0]
+        forward_id = f"relationship.generated.bridge.{index}.forward"
+        reverse_id = f"relationship.generated.bridge.{index}.reverse"
+        suffix = 1
+        while forward_id in relationship_ids or reverse_id in relationship_ids:
+            forward_id = f"relationship.generated.bridge.{index}.{suffix}.forward"
+            reverse_id = f"relationship.generated.bridge.{index}.{suffix}.reverse"
+            suffix += 1
+        base = {
+            "version": 1,
+            "relationshipType": "Relationship.CommunityTie",
+            "bBidirectional": True,
+            "trust": 0.58,
+            "affinity": 0.5,
+            "fear": 0.08,
+            "obligation": 0.45,
+        }
+        relationships.append({
+            **base, "id": forward_id, "sourceResidentId": source,
+            "targetResidentId": target, "reciprocalRelationshipId": reverse_id,
+        })
+        relationships.append({
+            **base, "id": reverse_id, "sourceResidentId": target,
+            "targetResidentId": source, "reciprocalRelationshipId": forward_id,
+        })
+        relationship_ids.update({forward_id, reverse_id})
+    payload["relationships"] = relationships
+    for resident in residents:
+        resident["relationshipIds"] = [
+            item["id"] for item in relationships
+            if resident["id"] in {item["sourceResidentId"], item["targetResidentId"]}
+        ]
+    if len(components) > 1:
+        changes.append(
+            f"connected {len(components)} resident relationship components with "
+            f"{len(components) - 1} minimal bridge(s)"
+        )
+
+    for event in payload["events"]:
+        event["participantResidentIds"] = _unique_strings(event.get("participantResidentIds"), valid_residents)
+        event["locationIds"] = _unique_strings(event.get("locationIds"), valid_locations)
+        event["revealedFactIds"] = _unique_strings(event.get("revealedFactIds"), valid_facts)
+
+    project = payload["changeProjects"][0]
+    conversions = {
+        "Purpose.Home": "Purpose.Clinic",
+        "Purpose.Workplace": "Purpose.Shelter",
+        "Purpose.Shelter": "Purpose.Headquarters",
+        "Purpose.Headquarters": "Purpose.Workplace",
+    }
+    eligible = [item for item in locations if item.get("bRepurposable") and item.get("purposeTag") in conversions]
+    target = location_by_id.get(project.get("targetLocationId"))
+    if target not in eligible:
+        target = eligible[0] if eligible else None
+    if target is None:
+        raise ValueError("population has no location eligible for a supported change project")
+    project["targetLocationId"] = target["id"]
+    project["desiredPurposeTag"] = conversions[target["purposeTag"]]
+    if project.get("initiatorResidentId") not in valid_residents:
+        project["initiatorResidentId"] = resident_ids[0]
+    participants = _unique_strings(project.get("requiredParticipantResidentIds"), valid_residents)
+    for required in (project["initiatorResidentId"], target.get("ownerResidentId"), target.get("controllerResidentId")):
+        if required in valid_residents and required not in participants:
+            participants.append(required)
+    project["requiredParticipantResidentIds"] = participants
+    if supported:
+        project["requiredCapabilityTags"] = _unique_strings(project.get("requiredCapabilityTags"), supported)
+    project["requiredConditionTags"] = [
+        "Condition.ThreatActive", "Condition.Overnight", "Condition.PlayerAway"
+    ]
+    project["intendedStartMinute"] = max(1200, int(project.get("intendedStartMinute", 1200)))
+    project["requiredTransitionMinutes"] = int(_clamp(project.get("requiredTransitionMinutes", 360), 60, 1440))
+    project["state"] = "Proposed"
+    payload["changeProjects"] = [project]
+    return changes
+
+
+def validate_population_semantics(request: dict, response: dict) -> None:
+    if request.get("stage") != "population":
+        return
+    payload = response["payload"]
+    current = request.get("current", {})
+    locations = current.get("locations", [])
+    facts = current.get("facts", [])
+    location_by_id = {item["id"]: item for item in locations}
+    resident_by_id = {item["id"]: item for item in payload["residents"]}
+    household_by_id = {item["id"]: item for item in payload["households"]}
+    relationship_by_id = {item["id"]: item for item in payload["relationships"]}
+    belief_by_id = {item["id"]: item for item in payload["beliefs"]}
+    fact_ids = {item["id"] for item in facts}
+    if len(resident_by_id) != len(payload["residents"]):
+        raise ValueError("population resident IDs must be unique")
+    resident_ids = set(resident_by_id)
+    for location in locations:
+        for field in ("ownerResidentId", "controllerResidentId"):
+            value = location.get(field, "")
+            if value and value not in resident_ids:
+                raise ValueError(f"location authority {value!r} is absent from the population")
+    for resident in payload["residents"]:
+        if resident["homeLocationId"] not in location_by_id or resident["currentLocationId"] not in location_by_id:
+            raise ValueError(f"resident {resident['id']} references an unknown location")
+        household = household_by_id.get(resident["householdId"])
+        if not household or household["homeLocationId"] != resident["homeLocationId"] or resident["id"] not in household["memberResidentIds"]:
+            raise ValueError(f"resident {resident['id']} has inconsistent household membership")
+        if any(item["factId"] not in fact_ids for item in resident["importantMemories"]):
+            raise ValueError(f"resident {resident['id']} has a memory outside the closed fact set")
+        if any(item not in belief_by_id for item in resident["beliefIds"]):
+            raise ValueError(f"resident {resident['id']} references an unknown belief")
+        if any(item not in relationship_by_id for item in resident["relationshipIds"]):
+            raise ValueError(f"resident {resident['id']} references an unknown relationship")
+    for household in payload["households"]:
+        home = location_by_id.get(household["homeLocationId"])
+        if not home or len(household["memberResidentIds"]) > int(home.get("residentCapacity", 0)):
+            raise ValueError(f"household {household['id']} exceeds its certified home capacity")
+    adjacency = {resident_id: set() for resident_id in resident_ids}
+    for relationship in payload["relationships"]:
+        source = relationship["sourceResidentId"]
+        target = relationship["targetResidentId"]
+        if source not in resident_ids or target not in resident_ids or source == target:
+            raise ValueError(f"relationship {relationship['id']} has invalid endpoints")
+        adjacency[source].add(target)
+        adjacency[target].add(source)
+        if relationship["bBidirectional"]:
+            reciprocal = relationship_by_id.get(relationship["reciprocalRelationshipId"])
+            if not reciprocal or reciprocal["sourceResidentId"] != target or reciprocal["targetResidentId"] != source:
+                raise ValueError(f"relationship {relationship['id']} has an invalid reciprocal")
+    visited: set[str] = set()
+    pending = [next(iter(resident_ids))]
+    while pending:
+        current_id = pending.pop()
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+        pending.extend(adjacency[current_id] - visited)
+    if visited != resident_ids:
+        raise ValueError("resident relationship network is disconnected")
+    for belief in payload["beliefs"]:
+        if belief["holderResidentId"] not in resident_ids or belief["factId"] not in fact_ids:
+            raise ValueError(f"belief {belief['id']} has invalid references")
+    covered_fact_ids = {belief["factId"] for belief in payload["beliefs"]}
+    orphaned_secrets = [
+        fact["id"] for fact in facts
+        if fact.get("bSecret") and fact["id"] not in covered_fact_ids
+    ]
+    if orphaned_secrets:
+        raise ValueError(f"secret facts have no resident belief holders: {orphaned_secrets}")
+    if len(payload["changeProjects"]) != 1 or payload["changeProjects"][0]["state"] != "Proposed":
+        raise ValueError("population requires exactly one Proposed change project")
+
+
+def normalize_and_validate_stage_response(request: dict, response: dict) -> tuple[dict, list[str]]:
+    if not isinstance(response, dict) or response.get("stage") != request.get("stage"):
+        raise ValueError("agent response has the wrong or non-canonical stage envelope")
+    if not isinstance(response.get("payload"), dict):
+        raise ValueError("agent response payload must be an object")
+    changes = normalize_topology_response(request, response)
+    changes.extend(normalize_population_response(request, response))
+    validate_stage_response(request, response)
+    validate_topology_semantics(request, response)
+    validate_population_semantics(request, response)
+    return response, changes
+
+
+def synthesized_population_response(request: dict) -> dict:
+    """Build the non-visual social compatibility layer locally and deterministically."""
+    current = request.get("current", {})
+    locations = copy.deepcopy(current.get("locations", [])) if isinstance(current, dict) else []
+    facts = copy.deepcopy(current.get("facts", [])) if isinstance(current, dict) else []
+    if not locations or not facts:
+        raise ValueError("local population synthesis requires accepted locations and facts")
+    authority_ids = _unique_strings([
+        value
+        for location in locations
+        for value in (location.get("ownerResidentId"), location.get("controllerResidentId"))
+        if isinstance(value, str) and value
+    ])
+    resident_ids = authority_ids[:30]
+    target_count = max(20, len(resident_ids))
+    while len(resident_ids) < target_count:
+        candidate = f"resident.generated.{len(resident_ids) + 1:02d}"
+        if candidate not in resident_ids:
+            resident_ids.append(candidate)
+    homes = [item for item in locations if item.get("purposeTag") == "Purpose.Home"]
+    workplaces = [item for item in locations if item.get("purposeTag") == "Purpose.Workplace"]
+    if not homes:
+        raise ValueError("local population synthesis requires at least one home")
+    if not workplaces:
+        workplaces = [item for item in locations if item not in homes] or homes
+    supported = _supported_tags(request)
+    occupations = sorted(tag for tag in supported if tag.startswith("Occupation."))
+    if not occupations:
+        occupations = ["Occupation.Worker"]
+    generated_names = (
+        "Mara Vale", "Ivo Reed", "Anwen Pike", "Tomas Wren", "Nia Alder",
+        "Corin Ash", "Elian Moss", "Sera Finch", "Bryn Holt", "Lina Ford",
+        "Orin Bell", "Mae Rowan", "Dara Flint", "Eira Fen", "Cal Thorn",
+        "Rhea Brook", "Jonas Gale", "Talia Hart", "Oren Lark", "Vera Dunn",
+        "Ari Stone", "Mira Fenn", "Cade Willow", "Esme Rill", "Theo Birch",
+        "Lysa Crane", "Ren Hawke", "Ada Cove", "Finn Marsh", "Noa Ember",
+    )
+    motivations = (
+        "Keep the settlement supplied through the present danger.",
+        "Protect the people who depend on this district.",
+        "Turn the town's old knowledge into a practical answer.",
+        "Hold the community together while its central tension unfolds.",
+        "Make the settlement safer without erasing what makes it home.",
+    )
+    fears = (
+        "The threat will isolate the outer homes first.",
+        "A rushed response will deepen the town's oldest division.",
+        "Vital supplies will fail before help can arrive.",
+        "The settlement will ignore a warning hidden in its own history.",
+        "Neighbors will turn on one another under pressure.",
+    )
+    residents = []
+    for index, resident_id in enumerate(resident_ids):
+        home = homes[index % len(homes)]
+        workplace = workplaces[index % len(workplaces)]
+        fact = facts[index % len(facts)]
+        id_name = resident_id.removeprefix("resident.").replace("_", " ").replace(".", " ").title()
+        display_name = (
+            generated_names[index % len(generated_names)]
+            if not id_name.strip() or
+            any(token in resident_id.lower() for token in ("generated", "authority", "owner", "controller"))
+            else id_name
+        )
+        residents.append({
+            "version": 1,
+            "id": resident_id,
+            "displayName": display_name,
+            "homeLocationId": home["id"],
+            "workplaceLocationId": workplace["id"],
+            "householdId": f"household.generated.{index % len(homes) + 1}",
+            "occupationTag": occupations[index % len(occupations)],
+            "bEmployed": True,
+            "currentLocationId": home["id"],
+            "motivation": motivations[index % len(motivations)],
+            "fear": fears[index % len(fears)],
+            "importantMemories": [{
+                "id": f"memory.generated.{index + 1:02d}",
+                "factId": fact["id"],
+                "summary": f"Remembers why this matters: {fact['statement']}",
+                "day": 0,
+                "emotionalSignificance": 0.65,
+            }],
+            "availability": "Available",
+            "beliefIds": [f"belief.generated.{index + 1:02d}"],
+            "relationshipIds": [],
+        })
+    households = []
+    for index, home in enumerate(homes):
+        members = [
+            resident["id"] for resident in residents
+            if resident["homeLocationId"] == home["id"]
+        ]
+        if members:
+            household_id = f"household.generated.{index + 1}"
+            households.append({
+                "version": 1,
+                "id": household_id,
+                "homeLocationId": home["id"],
+                "memberResidentIds": members,
+            })
+            for resident in residents:
+                if resident["id"] in members:
+                    resident["householdId"] = household_id
+    beliefs = [{
+        "version": 1,
+        "id": f"belief.generated.{index + 1:02d}",
+        "holderResidentId": resident["id"],
+        "factId": facts[index % len(facts)]["id"],
+        "confidence": 0.72,
+        "bImportantSecret": False,
+        "sourceResidentId": "",
+        "secrecy": 0.2,
+        "emotionalSignificance": 0.6,
+        "willingnessToShare": 0.65,
+    } for index, resident in enumerate(residents)]
+    relationships = []
+    for index, source in enumerate(residents):
+        target = residents[(index + 1) % len(residents)]
+        forward_id = f"relationship.generated.{index}.forward"
+        reverse_id = f"relationship.generated.{index}.reverse"
+        common = {
+            "version": 1,
+            "relationshipType": "Relationship.CommunityTie",
+            "bBidirectional": True,
+            "trust": 0.58,
+            "affinity": 0.5,
+            "fear": 0.08,
+            "obligation": 0.45,
+        }
+        relationships.append({
+            **common, "id": forward_id, "sourceResidentId": source["id"],
+            "targetResidentId": target["id"], "reciprocalRelationshipId": reverse_id,
+        })
+        relationships.append({
+            **common, "id": reverse_id, "sourceResidentId": target["id"],
+            "targetResidentId": source["id"], "reciprocalRelationshipId": forward_id,
+        })
+    for resident in residents:
+        resident["relationshipIds"] = [
+            item["id"] for item in relationships
+            if resident["id"] in {item["sourceResidentId"], item["targetResidentId"]}
+        ]
+    conversions = {
+        "Purpose.Home": "Purpose.Clinic",
+        "Purpose.Workplace": "Purpose.Shelter",
+        "Purpose.Shelter": "Purpose.Headquarters",
+        "Purpose.Headquarters": "Purpose.Workplace",
+    }
+    target = next(
+        (item for item in locations if item.get("bRepurposable") and item.get("purposeTag") in conversions),
+        next((item for item in locations if item.get("purposeTag") in conversions), None),
+    )
+    if target is None:
+        raise ValueError("local population synthesis requires a convertible location")
+    initiator = target.get("controllerResidentId") or target.get("ownerResidentId") or residents[0]["id"]
+    project_capabilities = {
+        "Purpose.Clinic": ["Capability.Bed", "Capability.Counter", "Capability.Door", "Capability.Interior"],
+        "Purpose.Shelter": ["Capability.Bed", "Capability.Chair", "Capability.Door", "Capability.Interior"],
+        "Purpose.Headquarters": ["Capability.WorkSurface", "Capability.Chair", "Capability.Door", "Capability.Interior"],
+        "Purpose.Workplace": ["Capability.WorkSurface", "Capability.Counter", "Capability.Door", "Capability.Interior"],
+    }
+    desired = conversions[target["purposeTag"]]
+    required_capabilities = project_capabilities[desired]
+    if supported:
+        required_capabilities = [item for item in required_capabilities if item in supported]
+    response = {
+        "stage": "population",
+        "payload": {
+            "residents": residents,
+            "households": households,
+            "relationships": relationships,
+            "beliefs": beliefs,
+            "events": [],
+            "changeProjects": [{
+                "version": 1,
+                "id": "project.generated.adaptation",
+                "initiatorResidentId": initiator,
+                "targetLocationId": target["id"],
+                "desiredPurposeTag": desired,
+                "reason": "Adapt one existing building to the settlement's active threat.",
+                "requiredParticipantResidentIds": [initiator],
+                "requiredCapabilityTags": required_capabilities,
+                "requiredConditionTags": [
+                    "Condition.ThreatActive", "Condition.Overnight", "Condition.PlayerAway"
+                ],
+                "intendedStartMinute": 1200,
+                "requiredTransitionMinutes": 360,
+                "state": "Proposed",
+            }],
+        },
+    }
+    response, changes = normalize_and_validate_stage_response(request, response)
+    response["diagnostics"] = {
+        "requestedModel": "deterministic local population synthesizer",
+        "reasoningEffort": "n/a",
+        "companionOutcome": "success",
+        "parseSuccess": True,
+        "schemaSuccess": True,
+        "inputTokens": 0,
+        "cachedInputTokens": 0,
+        "outputTokens": 0,
+        "reasoningOutputTokens": 0,
+        "normalizationChanges": changes,
+        "costNote": "No model call was made for the non-visual population compatibility layer.",
+    }
+    return response
+
+
+def synthesized_population_repair_response(request: dict) -> dict:
+    population = synthesized_population_response({**request, "stage": "population"})
+    replacements = [
+        {"section": section, "value": copy.deepcopy(population["payload"][section])}
+        for section in STAGE_KEYS["population"]
+    ]
+    response = {"stage": "repair", "payload": {"replacements": replacements}}
+    validate_stage_response(request, response)
+    response["diagnostics"] = population["diagnostics"]
+    return response
+
+
 def cli_response(request: dict, output_path: Path) -> dict:
     configured = os.environ.get("WORLD_DIRECTOR_CLI_COMMAND", "").strip()
     requested_model = str(request.get("model", "")).strip()
@@ -799,8 +1665,8 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 f'model_reasoning_effort="{reasoning_effort}"',
             ]
 
-    prompt = build_agent_prompt(request)
-    if len(prompt.encode("utf-8")) > MAX_REQUEST_BYTES:
+    base_prompt = build_agent_prompt(request)
+    if len(base_prompt.encode("utf-8")) > MAX_REQUEST_BYTES:
         raise ValueError(
             f"constructed prompt exceeds the {MAX_REQUEST_BYTES}-byte local CLI budget"
         )
@@ -809,55 +1675,149 @@ def cli_response(request: dict, output_path: Path) -> dict:
     events_path = artifact_path(output_path, "provider-events.jsonl")
     telemetry_path = artifact_path(output_path, "telemetry.json")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(prompt + "\n", encoding="utf-8")
     provider_started = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix="world-director-") as temp_dir:
-        agent_output = Path(temp_dir) / "agent-response.json"
-        expanded = [arg.replace("{output}", str(agent_output)) for arg in command]
-        timeout_seconds = float(
-            request.get("companionTimeoutSeconds", DEFAULT_COMPANION_TIMEOUT_SECONDS)
+    timeout_seconds = max(
+        1.0,
+        float(request.get("companionTimeoutSeconds", DEFAULT_COMPANION_TIMEOUT_SECONDS)),
+    )
+    deadline = provider_started + timeout_seconds
+    try:
+        provider_attempt_limit = int(request.get("providerMaxAttempts", DEFAULT_PROVIDER_ATTEMPTS))
+    except (TypeError, ValueError):
+        provider_attempt_limit = DEFAULT_PROVIDER_ATTEMPTS
+    provider_attempt_limit = max(1, min(3, provider_attempt_limit))
+    attempt_records: list[dict] = []
+    totals = {
+        "inputTokens": 0,
+        "cachedInputTokens": 0,
+        "outputTokens": 0,
+        "reasoningOutputTokens": 0,
+    }
+    correction = ""
+    last_error: Exception | None = None
+    global _ACTIVE_AGENT_PROCESS, _ACTIVE_TELEMETRY_PATH
+
+    for provider_attempt in range(1, provider_attempt_limit + 1):
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0.0:
+            last_error = RuntimeError(
+                f"CLI agent exhausted the companion timeout of {timeout_seconds:.1f} seconds."
+            )
+            break
+        prompt = base_prompt + correction
+        if len(prompt.encode("utf-8")) > MAX_REQUEST_BYTES:
+            raise ValueError(
+                f"corrective prompt exceeds the {MAX_REQUEST_BYTES}-byte local CLI budget"
+            )
+        prompt_path.write_text(prompt + "\n", encoding="utf-8")
+        attempt_prompt_path = artifact_path(
+            output_path, f"provider-attempt-{provider_attempt}-prompt.txt"
         )
-        timeout_seconds = max(1.0, timeout_seconds)
-        global _ACTIVE_AGENT_PROCESS, _ACTIVE_TELEMETRY_PATH
-        _ACTIVE_TELEMETRY_PATH = telemetry_path
-        timed_out = False
-        process = subprocess.Popen(
-            expanded,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=agent_environment(command[0]),
-            start_new_session=(os.name == "posix"),
-        )
-        _ACTIVE_AGENT_PROCESS = process
-        try:
+        attempt_prompt_path.write_text(prompt + "\n", encoding="utf-8")
+        attempt_started = time.perf_counter()
+        with tempfile.TemporaryDirectory(prefix="world-director-") as temp_dir:
+            agent_output = Path(temp_dir) / "agent-response.json"
+            expanded = [arg.replace("{output}", str(agent_output)) for arg in command]
+            _ACTIVE_TELEMETRY_PATH = telemetry_path
+            timed_out = False
+            process = subprocess.Popen(
+                expanded,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=agent_environment(command[0]),
+                start_new_session=(os.name == "posix"),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    if os.name == "nt" else 0
+                ),
+            )
+            _ACTIVE_AGENT_PROCESS = process
             try:
-                stdout, stderr = process.communicate(
-                    input=prompt,
-                    timeout=timeout_seconds,
-                )
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _terminate_process_tree(process)
                 try:
-                    stdout, stderr = process.communicate(timeout=5.0)
+                    stdout, stderr = process.communicate(input=prompt, timeout=remaining)
                 except subprocess.TimeoutExpired:
-                    _terminate_process_tree(process, force=True)
-                    stdout, stderr = process.communicate()
-        finally:
-            _ACTIVE_AGENT_PROCESS = None
-            _ACTIVE_TELEMETRY_PATH = None
-        return_code = process.returncode
-        provider_events = stdout or ""
+                    timed_out = True
+                    _terminate_process_tree(process)
+                    try:
+                        stdout, stderr = process.communicate(timeout=5.0)
+                    except subprocess.TimeoutExpired:
+                        _terminate_process_tree(process, force=True)
+                        stdout, stderr = process.communicate()
+            finally:
+                _ACTIVE_AGENT_PROCESS = None
+                _ACTIVE_TELEMETRY_PATH = None
+            return_code = process.returncode
+            stdout_text = stdout or ""
+            raw_response = agent_output.read_text(encoding="utf-8") if agent_output.exists() else ""
+            # Codex emits JSONL telemetry on stdout and writes the answer to {output}.
+            # A provider-neutral sandbox command may instead emit only its answer on stdout.
+            provider_events = stdout_text if raw_response else ""
+            if not raw_response and configured:
+                raw_response = stdout_text
+
         events_path.write_text(provider_events, encoding="utf-8")
-        raw_response = ""
-        if agent_output.exists():
-            raw_response = agent_output.read_text(encoding="utf-8")
-            raw_response_path.write_text(raw_response, encoding="utf-8")
-        telemetry = parse_provider_events(provider_events)
-        telemetry.update(
-            {
+        raw_response_path.write_text(raw_response, encoding="utf-8")
+        attempt_events_path = artifact_path(
+            output_path, f"provider-attempt-{provider_attempt}-events.jsonl"
+        )
+        attempt_raw_path = artifact_path(
+            output_path, f"provider-attempt-{provider_attempt}-raw-response.txt"
+        )
+        attempt_events_path.write_text(provider_events, encoding="utf-8")
+        attempt_raw_path.write_text(raw_response, encoding="utf-8")
+        usage = parse_provider_events(provider_events)
+        for key in totals:
+            totals[key] += int(usage.get(key, 0) or 0)
+        record = {
+            "providerAttempt": provider_attempt,
+            "durationSeconds": time.perf_counter() - attempt_started,
+            "exitCode": return_code,
+            "timedOut": timed_out,
+            "promptCharacters": len(prompt),
+            "responseCharacters": len(raw_response),
+            "threadId": usage.get("threadId", ""),
+            "inputTokens": usage.get("inputTokens", 0),
+            "cachedInputTokens": usage.get("cachedInputTokens", 0),
+            "outputTokens": usage.get("outputTokens", 0),
+            "reasoningOutputTokens": usage.get("reasoningOutputTokens", 0),
+            "promptPath": str(attempt_prompt_path),
+            "rawResponsePath": str(attempt_raw_path),
+            "providerEventsPath": str(attempt_events_path),
+            "providerStderr": (stderr or "")[-8000:],
+            "parseSuccess": False,
+            "schemaSuccess": False,
+            "normalizationChanges": [],
+        }
+
+        try:
+            if timed_out:
+                raise RuntimeError(
+                    f"CLI agent exceeded the companion timeout of {timeout_seconds:.1f} seconds."
+                )
+            if return_code != 0:
+                raise RuntimeError(
+                    f"configured CLI agent exited {return_code}: {(stderr or '')[-2000:]}"
+                )
+            if not raw_response:
+                raise RuntimeError("configured CLI agent produced no last-message file")
+            if len(raw_response.encode("utf-8")) > MAX_RESPONSE_BYTES:
+                raise ValueError(
+                    f"response exceeds the {MAX_RESPONSE_BYTES}-byte local CLI budget"
+                )
+            response = strict_json_loads(strip_code_fence(raw_response))
+            record["parseSuccess"] = True
+            response, normalization_changes = normalize_and_validate_stage_response(
+                request, response
+            )
+            record["schemaSuccess"] = True
+            record["normalizationChanges"] = normalization_changes
+            record["outcome"] = "success"
+            attempt_records.append(record)
+            telemetry = {
+                **usage,
+                **totals,
                 "runId": str(request.get("runId", "")),
                 "stage": str(request.get("stage", "")),
                 "attempt": int(request.get("attempt", 0) or 0),
@@ -872,69 +1832,77 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "telemetryPath": str(telemetry_path),
                 "exitCode": return_code,
                 "providerStderr": (stderr or "")[-8000:],
-                "timedOut": timed_out,
+                "timedOut": False,
                 "timeoutSeconds": timeout_seconds,
-                "parseSuccess": False,
-                "schemaSuccess": False,
+                "parseSuccess": True,
+                "schemaSuccess": True,
+                "providerAttemptCount": provider_attempt,
+                "providerAttempts": attempt_records,
+                "normalizationChanges": normalization_changes,
+                "companionOutcome": "success",
                 "billedCostUsd": None,
                 "costNote": (
                     "Unavailable: the Codex CLI reports tokens but does not emit a "
                     "monetary charge for this authenticated run."
                 ),
             }
-        )
-        if timed_out:
-            telemetry["companionOutcome"] = "provider_timeout"
-            telemetry["error"] = (
-                f"CLI agent exceeded the companion timeout of {timeout_seconds:.1f} seconds."
-            )
             telemetry_path.write_text(
                 json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
             )
-            raise RuntimeError(telemetry["error"])
-        if return_code != 0:
-            telemetry["companionOutcome"] = "provider_error"
-            telemetry_path.write_text(
-                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
-            )
-            raise RuntimeError(
-                f"configured CLI agent exited {return_code}: "
-                f"{(stderr or '')[-2000:]}"
-            )
-        if not raw_response:
-            telemetry["companionOutcome"] = "missing_response"
-            telemetry_path.write_text(
-                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
-            )
-            raise RuntimeError("configured CLI agent produced no last-message file")
-        if len(raw_response.encode("utf-8")) > MAX_RESPONSE_BYTES:
-            telemetry["companionOutcome"] = "response_too_large"
-            telemetry["responseValidationError"] = (
-                f"response exceeds the {MAX_RESPONSE_BYTES}-byte local CLI budget"
-            )
-            telemetry_path.write_text(
-                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
-            )
-            raise ValueError(telemetry["responseValidationError"])
-        try:
-            response = strict_json_loads(strip_code_fence(raw_response))
-            telemetry["parseSuccess"] = True
-            validate_stage_response(request, response)
-            telemetry["schemaSuccess"] = True
-            telemetry["companionOutcome"] = "success"
+            response["diagnostics"] = telemetry
+            return response
         except Exception as exc:
-            telemetry["companionOutcome"] = "response_validation_error"
-            telemetry["responseValidationError"] = str(exc)
-            telemetry_path.write_text(
-                json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
+            last_error = exc
+            record["outcome"] = (
+                "provider_timeout" if timed_out else
+                "provider_error" if return_code != 0 else
+                "response_validation_error"
             )
-            raise
-        telemetry_path.write_text(
-            json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
-        )
+            record["error"] = str(exc)[:2000]
+            attempt_records.append(record)
+            failure_telemetry = {
+                **usage,
+                **totals,
+                "runId": str(request.get("runId", "")),
+                "stage": str(request.get("stage", "")),
+                "attempt": int(request.get("attempt", 0) or 0),
+                "requestedModel": requested_model or "CLI default (not reported)",
+                "reasoningEffort": reasoning_effort or "CLI default",
+                "providerDurationSeconds": time.perf_counter() - provider_started,
+                "promptPath": str(prompt_path),
+                "rawResponsePath": str(raw_response_path),
+                "providerEventsPath": str(events_path),
+                "telemetryPath": str(telemetry_path),
+                "exitCode": return_code,
+                "timedOut": timed_out,
+                "timeoutSeconds": timeout_seconds,
+                "parseSuccess": record["parseSuccess"],
+                "schemaSuccess": False,
+                "providerAttemptCount": provider_attempt,
+                "providerAttempts": attempt_records,
+                "companionOutcome": record["outcome"],
+                "responseValidationError": str(exc)[:2000],
+                "billedCostUsd": None,
+                "costNote": (
+                    "Unavailable: the Codex CLI reports tokens but does not emit a "
+                    "monetary charge for this authenticated run."
+                ),
+            }
+            telemetry_path.write_text(
+                json.dumps(failure_telemetry, indent=2) + "\n", encoding="utf-8"
+            )
+            if provider_attempt >= provider_attempt_limit or timed_out:
+                break
+            correction = (
+                "\n\nCORRECTIVE RETRY: The previous provider response was rejected before "
+                "it reached Unreal. Regenerate the complete stage response from scratch. "
+                "Do not copy the invalid response. Correct this exact failure: "
+                f"{str(exc)[:1000]}"
+            )
 
-    response["diagnostics"] = telemetry
-    return response
+    if last_error is None:
+        last_error = RuntimeError("configured CLI agent failed without an explicit error")
+    raise last_error
 
 
 def main() -> int:
@@ -952,11 +1920,15 @@ def main() -> int:
         raise ValueError(f"unsupported or missing stage: {stage}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    response = (
-        fixture_response(request)
-        if request.get("providerMode") == "fixture"
-        else cli_response(request, args.output)
-    )
+    provider_mode = request.get("providerMode")
+    if provider_mode == "fixture":
+        response = fixture_response(request)
+    elif provider_mode == "synthesized" and stage == "population":
+        response = synthesized_population_response(request)
+    elif provider_mode == "synthesized" and stage == "repair" and request.get("populationBundleRepair"):
+        response = synthesized_population_repair_response(request)
+    else:
+        response = cli_response(request, args.output)
     temp_output = args.output.with_suffix(args.output.suffix + ".tmp")
     temp_output.write_text(json.dumps(response, indent=2) + "\n", encoding="utf-8")
     temp_output.replace(args.output)

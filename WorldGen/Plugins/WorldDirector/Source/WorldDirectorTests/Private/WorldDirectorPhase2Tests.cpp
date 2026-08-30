@@ -541,7 +541,7 @@ bool FWorldDirectorLivingTownFixtureTest::RunTest(const FString& Parameters)
 	}
 	TestEqual(TEXT("All 24 fixture residents resolve to visually distinct modular combinations"),
 		ResidentAppearances.Num(), Plan.Residents.Num());
-	int32 MultiwingHomeCount = 0;
+	TSet<FString> ResidentialShells;
 	TSet<FString> ShellSubstyles;
 	TMap<FString, int32> ShellUseCounts;
 	int32 MostRepeatedShellCount = 0;
@@ -553,12 +553,15 @@ bool FWorldDirectorLivingTownFixtureTest::RunTest(const FString& Parameters)
 			MostRepeatedShellCount, ++ShellUseCounts.FindOrAdd(Shell));
 		const FString Interior = Location.InteriorAsset.ToString();
 		if (Shell.Contains(TEXT("Home_Compact_01")) ||
+			Shell.Contains(TEXT("Home_Tall_01")) ||
 			Shell.Contains(TEXT("Workplace_Inn_01")))
 		{
 			TestTrue(*FString::Printf(TEXT("%s keeps its certified small interior pairing"),
 				*Location.LocationId), Interior.Contains(TEXT("Interior_Home_Small_01")));
 		}
-		else if (Shell.Contains(TEXT("Home_Multiwing_01")))
+		else if (Shell.Contains(TEXT("Home_Compact_02")) ||
+			Shell.Contains(TEXT("Home_Multiwing_01")) ||
+			Shell.Contains(TEXT("Home_Tall_02")))
 		{
 			TestTrue(*FString::Printf(TEXT("%s keeps its certified roomy interior pairing"),
 				*Location.LocationId), Interior.Contains(TEXT("Interior_Home_Compact_01")));
@@ -570,18 +573,19 @@ bool FWorldDirectorLivingTownFixtureTest::RunTest(const FString& Parameters)
 				*Location.LocationId), Interior.Contains(TEXT("Interior_Workplace_Longhouse_01")));
 		}
 	}
-	TestEqual(TEXT("Full town uses all five purpose-compatible shell archetypes"),
-		ShellSubstyles.Num(), 5);
+	TestEqual(TEXT("Full town uses all eight purpose-compatible shell archetypes"),
+		ShellSubstyles.Num(), 8);
 	TestTrue(TEXT("No shell occupies more than one third of the 18-location town"),
 		MostRepeatedShellCount <= 6);
 	for (int32 Index = 0; Index < 6; ++Index)
 	{
 		const FString Shell = Plan.Locations[Index].ShellAsset.ToString();
 		TestTrue(*FString::Printf(TEXT("Home %d uses a certified residential shell"), Index),
-			Shell.Contains(TEXT("Home_Compact_01")) || Shell.Contains(TEXT("Home_Multiwing_01")));
-		MultiwingHomeCount += Shell.Contains(TEXT("Home_Multiwing_01")) ? 1 : 0;
+			Shell.Contains(TEXT("BP_Cap_Home_")));
+		ResidentialShells.Add(Shell);
 	}
-	TestEqual(TEXT("Three larger homes are used only in certified map slots"), MultiwingHomeCount, 3);
+	TestEqual(TEXT("Six homes exercise all five certified residential silhouettes"),
+		ResidentialShells.Num(), 5);
 	const FResolvedLocationPlan* PrimaryLandmark = Plan.Locations.FindByPredicate(
 		[&Plan](const FResolvedLocationPlan& Location)
 		{
@@ -705,8 +709,8 @@ bool FWorldDirectorCompilerResolveFixtureTest::RunTest(const FString& Parameters
 		CompilerFixtureShells.Add(Shell);
 		CompilerFixtureGuildhallCount += Shell.Contains(TEXT("Workplace_Guildhall_01")) ? 1 : 0;
 	}
-	TestEqual(TEXT("Compact fixture demonstrates all five selected shell archetypes"),
-		CompilerFixtureShells.Num(), 5);
+	TestEqual(TEXT("Compact fixture demonstrates seven selected shell archetypes"),
+		CompilerFixtureShells.Num(), 7);
 	TestEqual(TEXT("Compact fixture reserves one guildhall for its primary landmark"),
 		CompilerFixtureGuildhallCount, 1);
 	TSet<FString> CompactPavedCourtyardIds;

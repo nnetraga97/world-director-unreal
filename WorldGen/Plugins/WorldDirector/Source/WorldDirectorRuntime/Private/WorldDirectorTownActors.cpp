@@ -115,7 +115,17 @@ AWorldDirectorDoorActor::AWorldDirectorDoorActor()
 	DoorMesh->SetRelativeLocation(FVector(0.0, 0.0, 110.0));
 	DoorMesh->SetRelativeScale3D(FVector(0.12, 1.6, 2.2));
 	DoorMesh->SetCollisionProfileName(TEXT("BlockAllDynamic"));
+	DoorMesh->SetCanEverAffectNavigation(false);
 	SetDoorOpen(true);
+}
+
+void AWorldDirectorDoorActor::NotifyActorOnClicked(const FKey ButtonPressed)
+{
+	Super::NotifyActorOnClicked(ButtonPressed);
+	if (ButtonPressed == EKeys::LeftMouseButton)
+	{
+		ToggleDoor();
+	}
 }
 
 void AWorldDirectorDoorActor::SetDoorOpen(const bool bOpen)
@@ -124,7 +134,19 @@ void AWorldDirectorDoorActor::SetDoorOpen(const bool bOpen)
 	if (DoorMesh != nullptr)
 	{
 		DoorMesh->SetRelativeRotation(FRotator(0.0, bOpen ? 90.0 : 0.0, 0.0));
-		DoorMesh->SetCollisionEnabled(bOpen ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics);
+		if (bOpen)
+		{
+			// Keep an open door visible to the controller's visibility trace so it
+			// remains a usable click target without blocking player movement.
+			DoorMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+			DoorMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
+			DoorMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+		}
+		else
+		{
+			DoorMesh->SetCollisionProfileName(TEXT("BlockAllDynamic"));
+			DoorMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		}
 	}
 }
 
@@ -1786,12 +1808,29 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 		UStaticMeshComponent* VendorDoorComponent = nullptr;
 		for (UStaticMeshComponent* Component : ShellComponents)
 		{
-			if (Component != nullptr && Component->GetName().Contains(TEXT("door"), ESearchCase::IgnoreCase))
+			if (Component != nullptr && Component->GetName().Equals(TEXT("FrontDoorComponent"), ESearchCase::IgnoreCase))
 			{
 				VendorDoorComponent = Component;
-				Component->SetVisibility(false, true);
-				Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				break;
 			}
+		}
+		if (VendorDoorComponent == nullptr)
+		{
+			for (UStaticMeshComponent* Component : ShellComponents)
+			{
+				if (Component != nullptr &&
+					Component->GetName().Contains(TEXT("door"), ESearchCase::IgnoreCase) &&
+					!Component->GetName().Contains(TEXT("frame"), ESearchCase::IgnoreCase))
+				{
+					VendorDoorComponent = Component;
+					break;
+				}
+			}
+		}
+		if (VendorDoorComponent != nullptr)
+		{
+			VendorDoorComponent->SetVisibility(false, true);
+			VendorDoorComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		}
 		TArray<UStaticMeshComponent*> InteriorComponents;
 		LocationActor->InteriorActor->GetComponents(InteriorComponents);
@@ -1804,16 +1843,28 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 			}
 		}
 
+		FTransform DoorTransform = Location.EntranceTransform;
+		if (VendorDoorComponent != nullptr)
+		{
+			// The certified semantic entrance is the playable/nav anchor. Some
+			// vendor components place their mesh pivot inside the shell, so using
+			// their world location would put the proxy behind the wall. Preserve
+			// the authored facing and scale without replacing the certified
+			// entrance position.
+			const FTransform SourceDoorTransform = VendorDoorComponent->GetComponentTransform();
+			DoorTransform.SetRotation(SourceDoorTransform.GetRotation());
+			DoorTransform.SetScale3D(SourceDoorTransform.GetScale3D());
+		}
 		LocationActor->DoorActor = World->SpawnActor<AWorldDirectorDoorActor>(
-			AWorldDirectorDoorActor::StaticClass(),
-			Location.EntranceTransform);
+			AWorldDirectorDoorActor::StaticClass(), DoorTransform);
 		if (LocationActor->DoorActor != nullptr)
 		{
 			if (VendorDoorComponent != nullptr && VendorDoorComponent->GetStaticMesh() != nullptr)
 			{
 				LocationActor->DoorActor->DoorMesh->SetStaticMesh(VendorDoorComponent->GetStaticMesh());
-				LocationActor->DoorActor->DoorMesh->SetRelativeLocation(FVector::ZeroVector);
-				LocationActor->DoorActor->DoorMesh->SetRelativeScale3D(FVector::OneVector);
+				// The proxy actor owns the selected entrance transform, so clear the
+				// fallback cube offset before applying the source mesh and materials.
+				LocationActor->DoorActor->DoorMesh->SetRelativeTransform(FTransform::Identity);
 				for (int32 MaterialIndex = 0; MaterialIndex < VendorDoorComponent->GetNumMaterials(); ++MaterialIndex)
 				{
 					LocationActor->DoorActor->DoorMesh->SetMaterial(MaterialIndex, VendorDoorComponent->GetMaterial(MaterialIndex));

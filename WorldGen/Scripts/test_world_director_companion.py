@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import textwrap
 import unittest
 
 
@@ -24,6 +25,14 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"Could not load companion module from {COMPANION_PATH}")
 COMPANION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(COMPANION)
+FIXTURE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "Plugins"
+    / "WorldDirector"
+    / "Resources"
+    / "Fixtures"
+    / "living-town.json"
+)
 
 
 def request_for(stage: str) -> dict:
@@ -71,6 +80,38 @@ def request_for(stage: str) -> dict:
         },
         "validationIssues": [],
     }
+
+
+def integrated_request_for(stage: str) -> dict:
+    fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    request = request_for(stage)
+    request["current"] = {
+        key: fixture[key]
+        for key in ("id", "seed", "brief", "topology", "locations", "facts", "threats")
+    }
+    request["capabilitySummary"] = {"supportedTags": sorted({
+        "Purpose.Home",
+        "Purpose.Workplace",
+        "Purpose.Landmark",
+        "Purpose.Clinic",
+        "Purpose.Shelter",
+        "Purpose.Headquarters",
+        "Occupation.Farmer",
+        "Occupation.Worker",
+        "Occupation.Merchant",
+        "Occupation.Guard",
+        "Occupation.Reeve",
+        "Occupation.Herbalist",
+        "Capability.Bed",
+        "Capability.WorkSurface",
+        "Capability.Chair",
+        "Capability.Counter",
+        "Capability.Door",
+        "Capability.Interior",
+        "Capability.Landmark",
+        "Capability.Character.Modular",
+    })}
+    return request
 
 
 class CompanionContractTests(unittest.TestCase):
@@ -211,6 +252,228 @@ class CompanionContractTests(unittest.TestCase):
         self.assertTrue(telemetry["usageAvailable"])
         self.assertEqual(telemetry["inputTokens"], 120)
         self.assertEqual(telemetry["outputTokens"], 30)
+
+    def test_topology_normalization_guarantees_capacity_and_project_target(self) -> None:
+        request = integrated_request_for("topology")
+        response = COMPANION.fixture_response(request)
+        for location in response["payload"]["locations"]:
+            if location["purposeTag"] == "Purpose.Home":
+                location["residentCapacity"] = 1
+            location["bRepurposable"] = False
+        response, changes = COMPANION.normalize_and_validate_stage_response(request, response)
+        homes = [
+            item for item in response["payload"]["locations"]
+            if item["purposeTag"] == "Purpose.Home"
+        ]
+        self.assertGreaterEqual(sum(item["residentCapacity"] for item in homes), 30)
+        self.assertTrue(any(item["bRepurposable"] for item in response["payload"]["locations"]))
+        self.assertTrue(changes)
+
+    def test_topology_authorities_are_collapsed_to_population_limit(self) -> None:
+        request = integrated_request_for("topology")
+        response = COMPANION.fixture_response(request)
+        for index, location in enumerate(response["payload"]["locations"]):
+            location["ownerResidentId"] = "resident." if index == 0 else f"resident.owner.{index}"
+            location["controllerResidentId"] = f"resident.controller.{index}"
+        response, changes = COMPANION.normalize_and_validate_stage_response(request, response)
+        authority_ids = {
+            authority
+            for location in response["payload"]["locations"]
+            for authority in (location["ownerResidentId"], location["controllerResidentId"])
+            if authority
+        }
+        self.assertLessEqual(len(authority_ids), 30)
+        self.assertTrue(any("overflow authority" in change for change in changes))
+
+        population_request = integrated_request_for("population")
+        for key in ("topology", "locations", "facts", "threats"):
+            population_request["current"][key] = response["payload"][key]
+        population = COMPANION.synthesized_population_response(population_request)
+        COMPANION.validate_population_semantics(population_request, population)
+        self.assertTrue(all(
+            resident["displayName"].strip()
+            for resident in population["payload"]["residents"]
+        ))
+
+    def test_population_normalization_repairs_historical_cross_reference_failures(self) -> None:
+        request = integrated_request_for("population")
+        request["current"]["locations"][0]["ownerResidentId"] = "resident.required_authority"
+        response = COMPANION.fixture_response(request)
+        payload = response["payload"]
+        payload["residents"][0]["currentLocationId"] = "location.missing"
+        payload["residents"][0]["importantMemories"][0]["factId"] = "threat.not_a_fact"
+        payload["residents"][1]["beliefIds"] = []
+        payload["residents"][2]["relationshipIds"] = ["relationship.missing"]
+        payload["households"][0]["memberResidentIds"] = [
+            item["id"] for item in payload["residents"]
+        ]
+        payload["relationships"] = payload["relationships"][:2]
+        payload["beliefs"][0]["factId"] = "fact.missing"
+        payload["changeProjects"][0].update({
+            "initiatorResidentId": "resident.missing",
+            "targetLocationId": "location.missing",
+            "desiredPurposeTag": "Purpose.Unsupported",
+            "requiredParticipantResidentIds": ["resident.missing"],
+            "requiredConditionTags": ["Condition.Unsupported"],
+            "intendedStartMinute": 1,
+            "requiredTransitionMinutes": 1,
+            "state": "Active",
+        })
+        response, changes = COMPANION.normalize_and_validate_stage_response(request, response)
+        self.assertTrue(changes)
+        self.assertIn(
+            "resident.required_authority",
+            {item["id"] for item in response["payload"]["residents"]},
+        )
+        self.assertLess(len(json.dumps(response).encode("utf-8")), COMPANION.MAX_RESPONSE_BYTES)
+
+    def test_population_normalization_survives_mutated_edge_cases(self) -> None:
+        base_request = integrated_request_for("population")
+        for mutation in range(60):
+            with self.subTest(mutation=mutation):
+                request = json.loads(json.dumps(base_request))
+                response = COMPANION.fixture_response(request)
+                payload = response["payload"]
+                resident = payload["residents"][mutation % len(payload["residents"])]
+                resident["currentLocationId"] = f"location.missing.{mutation}"
+                resident["beliefIds"] = []
+                resident["relationshipIds"] = []
+                resident["importantMemories"][0]["factId"] = f"fact.missing.{mutation}"
+                payload["relationships"] = payload["relationships"][: mutation % 9 + 1]
+                payload["households"] = payload["households"][: mutation % 3 + 1]
+                payload["beliefs"] = payload["beliefs"][: mutation % 5 + 1]
+                payload["changeProjects"][0]["targetLocationId"] = "location.missing"
+                normalized, _ = COMPANION.normalize_and_validate_stage_response(request, response)
+                self.assertLess(
+                    len(json.dumps(normalized).encode("utf-8")),
+                    COMPANION.MAX_RESPONSE_BYTES,
+                )
+
+    def test_provider_retries_malformed_json_then_accepts_valid_response(self) -> None:
+        request = request_for("interpret")
+        request["providerMode"] = "cli"
+        request["providerMaxAttempts"] = 2
+        request["companionTimeoutSeconds"] = 10
+        valid = COMPANION.fixture_response(request)
+        previous = os.environ.get("WORLD_DIRECTOR_CLI_COMMAND")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "provider.py"
+            counter = root / "counter.txt"
+            script.write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    from pathlib import Path
+                    import sys
+                    counter = Path(sys.argv[1])
+                    output = Path(sys.argv[2])
+                    count = int(counter.read_text() or "0") if counter.exists() else 0
+                    counter.write_text(str(count + 1))
+                    if count == 0:
+                        output.write_text('{"stage":"interpret","stage":"repair"}')
+                    else:
+                        output.write_text(sys.stdin.read())
+                    print(json.dumps({"type":"thread.started","thread_id":f"attempt-{count + 1}"}))
+                    """
+                ),
+                encoding="utf-8",
+            )
+            # The second attempt reads the complete valid JSON from stdin. Use a tiny wrapper
+            # prompt-independent command so this remains a provider-boundary test.
+            valid_path = root / "valid.json"
+            valid_path.write_text(json.dumps(valid), encoding="utf-8")
+            script.write_text(
+                script.read_text(encoding="utf-8").replace(
+                    "output.write_text(sys.stdin.read())",
+                    f"output.write_text(Path({str(valid_path)!r}).read_text())",
+                ),
+                encoding="utf-8",
+            )
+            os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = (
+                f"{sys.executable} {script} {counter} {{output}}"
+            )
+            try:
+                output_path = root / "interpret-response.json"
+                response = COMPANION.cli_response(request, output_path)
+                self.assertEqual(response["stage"], "interpret")
+                self.assertEqual(response["diagnostics"]["providerAttemptCount"], 2)
+                self.assertEqual(
+                    response["diagnostics"]["providerAttempts"][0]["outcome"],
+                    "response_validation_error",
+                )
+            finally:
+                if previous is None:
+                    os.environ.pop("WORLD_DIRECTOR_CLI_COMMAND", None)
+                else:
+                    os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = previous
+
+    def test_configured_provider_may_return_response_on_stdout(self) -> None:
+        request = request_for("interpret")
+        request["providerMode"] = "cli"
+        request["companionTimeoutSeconds"] = 10
+        valid = COMPANION.fixture_response(request)
+        previous = os.environ.get("WORLD_DIRECTOR_CLI_COMMAND")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            response_path = root / "valid.json"
+            response_path.write_text(json.dumps(valid), encoding="utf-8")
+            script = root / "stdout_provider.py"
+            script.write_text(
+                "from pathlib import Path\nimport sys\nprint(Path(sys.argv[1]).read_text())\n",
+                encoding="utf-8",
+            )
+            os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = (
+                f"{sys.executable} {script} {response_path}"
+            )
+            try:
+                response = COMPANION.cli_response(request, root / "interpret-response.json")
+                self.assertEqual(response["stage"], "interpret")
+                self.assertEqual(response["diagnostics"]["providerAttemptCount"], 1)
+            finally:
+                if previous is None:
+                    os.environ.pop("WORLD_DIRECTOR_CLI_COMMAND", None)
+                else:
+                    os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = previous
+
+    def test_population_over_maximum_is_rejected(self) -> None:
+        request = integrated_request_for("population")
+        response = COMPANION.fixture_response(request)
+        response["payload"]["residents"].extend(
+            json.loads(json.dumps(response["payload"]["residents"][:7]))
+        )
+        with self.assertRaisesRegex(ValueError, "too many items|unique"):
+            COMPANION.validate_stage_response(request, response)
+
+    def test_local_population_synthesis_is_bounded_and_semantically_valid(self) -> None:
+        request = integrated_request_for("population")
+        response = COMPANION.synthesized_population_response(request)
+        self.assertEqual(len(response["payload"]["residents"]), 20)
+        self.assertEqual(response["diagnostics"]["inputTokens"], 0)
+        self.assertLess(len(json.dumps(response).encode("utf-8")), COMPANION.MAX_RESPONSE_BYTES)
+        COMPANION.validate_population_semantics(request, response)
+
+        payload = response["payload"]
+        secret_fact_ids = {fact["id"] for fact in request["current"]["facts"] if fact["bSecret"]}
+        covered_fact_ids = {belief["factId"] for belief in payload["beliefs"]}
+        self.assertLessEqual(secret_fact_ids, covered_fact_ids)
+        self.assertGreater(len({resident["displayName"] for resident in payload["residents"]}), 1)
+        self.assertGreater(len({resident["occupationTag"] for resident in payload["residents"]}), 1)
+        self.assertGreater(len({resident["motivation"] for resident in payload["residents"]}), 1)
+        self.assertGreater(len(covered_fact_ids), 1)
+
+    def test_population_bundle_repair_replaces_every_coupled_section(self) -> None:
+        request = integrated_request_for("repair")
+        request["populationBundleRepair"] = True
+        request["repairTargets"] = [
+            {"section": section} for section in COMPANION.STAGE_KEYS["population"]
+        ]
+        response = COMPANION.synthesized_population_repair_response(request)
+        self.assertEqual(
+            {item["section"] for item in response["payload"]["replacements"]},
+            set(COMPANION.STAGE_KEYS["population"]),
+        )
+        self.assertLess(len(json.dumps(response).encode("utf-8")), COMPANION.MAX_RESPONSE_BYTES)
 
     def test_cli_timeout_writes_bounded_telemetry(self) -> None:
         request = request_for("interpret")

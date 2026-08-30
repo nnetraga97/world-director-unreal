@@ -1480,6 +1480,29 @@ bool TryGetTopLevelArrayIndex(
 	return OutIndex >= 0;
 }
 
+bool RequiresPopulationBundleRepair(const FValidationReport& Report)
+{
+	static const TSet<FString> PopulationSections = {
+		TEXT("residents"), TEXT("households"), TEXT("relationships"),
+		TEXT("beliefs"), TEXT("events"), TEXT("changeProjects")
+	};
+	for (const FValidationIssue& Issue : Report.Issues)
+	{
+		const FString Section = ValidationSection(Issue.Path);
+		if (PopulationSections.Contains(Section))
+		{
+			return true;
+		}
+		if (Section == TEXT("locations") &&
+			(Issue.Path.Contains(TEXT(".ownerResidentId")) ||
+			 Issue.Path.Contains(TEXT(".controllerResidentId"))))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 bool EnsureAuthoritativeThreatFact(
 	const TSharedRef<FJsonObject>& WorkingDocument,
 	FString& OutError)
@@ -1731,6 +1754,12 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	}
 
 	const FString StageName = StageWireName();
+	const bool bPopulationBundleRepair =
+		StageName == TEXT("repair") && RequiresPopulationBundleRepair(LastGenerationValidation);
+	const FString StageProviderMode = bFixtureProviderForTesting
+		? TEXT("fixture")
+		: (StageName == TEXT("population") || bPopulationBundleRepair
+			? TEXT("synthesized") : TEXT("cli"));
 	const int32 Ordinal = StageFileOrdinal();
 	ActiveGenerationRequestId = FString::Printf(
 		TEXT("%s-%02d-%llu-%s"),
@@ -1753,8 +1782,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	Request->SetStringField(TEXT("reasoningEffort"), GenerationReasoningEffort);
 	Request->SetNumberField(TEXT("seed"), GenerationSeed);
 	Request->SetNumberField(TEXT("attempt"), RepairAttempt);
-	Request->SetStringField(
-		TEXT("providerMode"), bFixtureProviderForTesting ? TEXT("fixture") : TEXT("cli"));
+	Request->SetStringField(TEXT("providerMode"), StageProviderMode);
 
 	// Later stages do not need the entire mutable document. In particular, repair
 	// requests must not resend every resident, relationship, and memory when only
@@ -1799,9 +1827,22 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	}
 	if (StageName == TEXT("repair"))
 	{
+		if (bPopulationBundleRepair)
+		{
+			CopyCurrentObject(TEXT("brief"));
+			CopyCurrentObject(TEXT("topology"));
+			for (const TCHAR* Field : {TEXT("locations"), TEXT("facts"), TEXT("threats")})
+			{
+				CopyCurrentArray(Field);
+			}
+		}
 		bool bRepairNeedsBeliefs = false;
 		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
 		{
+			if (bPopulationBundleRepair)
+			{
+				break;
+			}
 			const FString IssueCode = Issue.Code.ToString();
 			const FString Section = ValidationSection(Issue.Path);
 			if (IssueCode == TEXT("slice.resident_social_state") ||
@@ -1811,45 +1852,47 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 				break;
 			}
 		}
-		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+		if (!bPopulationBundleRepair)
 		{
-			const FString Section = ValidationSection(Issue.Path);
-			if (Section.IsEmpty() || Section == TEXT("$"))
+			for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
 			{
-				continue;
-			}
-			int32 Index = INDEX_NONE;
-			if (TryGetTopLevelArrayIndex(Issue.Path, Section, Index))
-			{
-				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-				if (WorkingGenerationDocument->TryGetArrayField(Section, Values) &&
-					Values != nullptr && Values->IsValidIndex(Index))
+				const FString Section = ValidationSection(Issue.Path);
+				if (Section.IsEmpty() || Section == TEXT("$"))
 				{
-					const TSharedPtr<FJsonObject> Entry = (*Values)[Index].IsValid()
-						? (*Values)[Index]->AsObject() : nullptr;
-					if (Entry.IsValid())
+					continue;
+				}
+				int32 Index = INDEX_NONE;
+				if (TryGetTopLevelArrayIndex(Issue.Path, Section, Index))
+				{
+					const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+					if (WorkingGenerationDocument->TryGetArrayField(Section, Values) &&
+						Values != nullptr && Values->IsValidIndex(Index))
 					{
-						const TSharedPtr<FJsonObject>* Existing =
-							nullptr;
-						if (!StageCurrent->TryGetObjectField(Section, Existing) ||
-							Existing == nullptr || !Existing->IsValid())
+						const TSharedPtr<FJsonObject> Entry = (*Values)[Index].IsValid()
+							? (*Values)[Index]->AsObject() : nullptr;
+						if (Entry.IsValid())
 						{
-							StageCurrent->SetObjectField(Section, MakeShared<FJsonObject>());
-							StageCurrent->TryGetObjectField(Section, Existing);
-						}
-						if (Existing != nullptr && Existing->IsValid())
-						{
-							(*Existing)->SetObjectField(FString::FromInt(Index), Entry);
+							const TSharedPtr<FJsonObject>* Existing = nullptr;
+							if (!StageCurrent->TryGetObjectField(Section, Existing) ||
+								Existing == nullptr || !Existing->IsValid())
+							{
+								StageCurrent->SetObjectField(Section, MakeShared<FJsonObject>());
+								StageCurrent->TryGetObjectField(Section, Existing);
+							}
+							if (Existing != nullptr && Existing->IsValid())
+							{
+								(*Existing)->SetObjectField(FString::FromInt(Index), Entry);
+							}
 						}
 					}
 				}
-			}
-			else
-			{
-				CopyCurrentObject(*Section);
+				else
+				{
+					CopyCurrentObject(*Section);
+				}
 			}
 		}
-		if (bRepairNeedsBeliefs)
+		if (bRepairNeedsBeliefs && !bPopulationBundleRepair)
 		{
 			CopyCurrentArray(TEXT("beliefs"));
 			CopyCurrentArray(TEXT("facts"));
@@ -1861,45 +1904,62 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	if (StageName == TEXT("repair"))
 	{
 		TSet<FString> SeenTargets;
-		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+		if (bPopulationBundleRepair)
 		{
-			const FString Section = ValidationSection(Issue.Path);
-			if (Section.IsEmpty() || Section == TEXT("$"))
+			for (const TCHAR* Section : {
+				TEXT("residents"), TEXT("households"), TEXT("relationships"),
+				TEXT("beliefs"), TEXT("events"), TEXT("changeProjects")})
 			{
-				continue;
+				const TSharedRef<FJsonObject> Target = MakeShared<FJsonObject>();
+				Target->SetStringField(TEXT("section"), Section);
+				TArray<TSharedPtr<FJsonValue>> IssueCodes;
+				IssueCodes.Add(MakeShared<FJsonValueString>(TEXT("population.bundle_rebuild")));
+				Target->SetArrayField(TEXT("issueCodes"), IssueCodes);
+				RepairTargetValues.Add(MakeShared<FJsonValueObject>(Target));
+				SeenTargets.Add(FString(Section) + TEXT("|*"));
 			}
-			int32 Index = INDEX_NONE;
-			const bool bHasIndex = TryGetTopLevelArrayIndex(Issue.Path, Section, Index);
-			const FString TargetKey = Section + TEXT("|") +
-				(bHasIndex ? FString::FromInt(Index) : TEXT("*"));
-			TSharedPtr<FJsonObject> Target;
-			if (SeenTargets.Contains(TargetKey))
+		}
+		else
+		{
+			for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
 			{
-				continue;
-			}
-			SeenTargets.Add(TargetKey);
-			Target = MakeShared<FJsonObject>();
-			Target->SetStringField(TEXT("section"), Section);
-			if (bHasIndex)
-			{
-				Target->SetNumberField(TEXT("index"), Index);
-				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-				if (WorkingGenerationDocument->TryGetArrayField(Section, Values) &&
-					Values != nullptr && Values->IsValidIndex(Index))
+				const FString Section = ValidationSection(Issue.Path);
+				if (Section.IsEmpty() || Section == TEXT("$"))
 				{
-					FString Id;
-					const TSharedPtr<FJsonObject> Entry = (*Values)[Index].IsValid()
-						? (*Values)[Index]->AsObject() : nullptr;
-					if (Entry.IsValid() && Entry->TryGetStringField(TEXT("id"), Id))
+					continue;
+				}
+				int32 Index = INDEX_NONE;
+				const bool bHasIndex = TryGetTopLevelArrayIndex(Issue.Path, Section, Index);
+				const FString TargetKey = Section + TEXT("|") +
+					(bHasIndex ? FString::FromInt(Index) : TEXT("*"));
+				if (SeenTargets.Contains(TargetKey))
+				{
+					continue;
+				}
+				SeenTargets.Add(TargetKey);
+				const TSharedPtr<FJsonObject> Target = MakeShared<FJsonObject>();
+				Target->SetStringField(TEXT("section"), Section);
+				if (bHasIndex)
+				{
+					Target->SetNumberField(TEXT("index"), Index);
+					const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+					if (WorkingGenerationDocument->TryGetArrayField(Section, Values) &&
+						Values != nullptr && Values->IsValidIndex(Index))
 					{
-						Target->SetStringField(TEXT("id"), Id);
+						FString Id;
+						const TSharedPtr<FJsonObject> Entry = (*Values)[Index].IsValid()
+							? (*Values)[Index]->AsObject() : nullptr;
+						if (Entry.IsValid() && Entry->TryGetStringField(TEXT("id"), Id))
+						{
+							Target->SetStringField(TEXT("id"), Id);
+						}
 					}
 				}
+				TArray<TSharedPtr<FJsonValue>> IssueCodes;
+				IssueCodes.Add(MakeShared<FJsonValueString>(Issue.Code.ToString()));
+				Target->SetArrayField(TEXT("issueCodes"), IssueCodes);
+				RepairTargetValues.Add(MakeShared<FJsonValueObject>(Target.ToSharedRef()));
 			}
-			TArray<TSharedPtr<FJsonValue>> IssueCodes;
-			IssueCodes.Add(MakeShared<FJsonValueString>(Issue.Code.ToString()));
-			Target->SetArrayField(TEXT("issueCodes"), IssueCodes);
-			RepairTargetValues.Add(MakeShared<FJsonValueObject>(Target.ToSharedRef()));
 		}
 		bool bRepairNeedsBeliefs = false;
 		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
@@ -1913,7 +1973,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 				break;
 			}
 		}
-		if (bRepairNeedsBeliefs && !SeenTargets.Contains(TEXT("beliefs|*")))
+		if (!bPopulationBundleRepair && bRepairNeedsBeliefs && !SeenTargets.Contains(TEXT("beliefs|*")))
 		{
 			TSharedPtr<FJsonObject> BeliefsTarget = MakeShared<FJsonObject>();
 			BeliefsTarget->SetStringField(TEXT("section"), TEXT("beliefs"));
@@ -1925,6 +1985,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 		}
 	}
 	Request->SetArrayField(TEXT("repairTargets"), RepairTargetValues);
+	Request->SetBoolField(TEXT("populationBundleRepair"), bPopulationBundleRepair);
 
 	const TSharedRef<FJsonObject> CapabilitySummary = MakeShared<FJsonObject>();
 	CapabilitySummary->SetStringField(TEXT("theme"), TEXT("Asset-led stylized village and rural frontier"));
@@ -2050,12 +2111,20 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	Request->SetObjectField(TEXT("worldContext"), WorldContext);
 
 	TArray<TSharedPtr<FJsonValue>> ValidationValues;
+	TSet<FString> SeenValidationClasses;
 	for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
 	{
+		const FString BoundedMessage = Issue.Message.Left(512);
+		const FString ValidationClass = Issue.Code.ToString() + TEXT("|") + BoundedMessage;
+		if (SeenValidationClasses.Contains(ValidationClass) || ValidationValues.Num() >= 32)
+		{
+			continue;
+		}
+		SeenValidationClasses.Add(ValidationClass);
 		const TSharedRef<FJsonObject> IssueObject = MakeShared<FJsonObject>();
 		IssueObject->SetStringField(TEXT("code"), Issue.Code.ToString());
 		IssueObject->SetStringField(TEXT("path"), Issue.Path);
-		IssueObject->SetStringField(TEXT("message"), Issue.Message);
+		IssueObject->SetStringField(TEXT("message"), BoundedMessage);
 		ValidationValues.Add(MakeShared<FJsonValueObject>(IssueObject));
 	}
 	Request->SetArrayField(TEXT("validationIssues"), ValidationValues);
@@ -2092,7 +2161,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	Metric.StartedAtUtc = FDateTime::UtcNow().ToIso8601();
 	Metric.RequestPath = RequestPath;
 	Metric.ResponsePath = ResponsePath;
-	if (!bFixtureProviderForTesting)
+	if (StageProviderMode == TEXT("cli"))
 	{
 		Metric.PromptPath = FPaths::Combine(GenerationRunDirectory, Prefix + TEXT("-prompt.txt"));
 		Metric.RawResponsePath = FPaths::Combine(
@@ -2102,9 +2171,12 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 		Metric.TelemetryPath = FPaths::Combine(
 			GenerationRunDirectory, Prefix + TEXT("-telemetry.json"));
 	}
-	Metric.Model = GenerationModel.IsEmpty() ? TEXT("CLI default (not reported)") : GenerationModel;
-	Metric.ReasoningEffort = GenerationReasoningEffort.IsEmpty()
-		? TEXT("CLI default") : GenerationReasoningEffort;
+	Metric.Model = StageProviderMode == TEXT("synthesized")
+		? TEXT("deterministic local population synthesizer")
+		: (GenerationModel.IsEmpty() ? TEXT("CLI default (not reported)") : GenerationModel);
+	Metric.ReasoningEffort = StageProviderMode == TEXT("synthesized")
+		? TEXT("n/a")
+		: (GenerationReasoningEffort.IsEmpty() ? TEXT("CLI default") : GenerationReasoningEffort);
 	Metric.RequestBytes = RequestBytes;
 	CurrentMetricIndex = GenerationMetrics.Num() - 1;
 	CurrentStageStartedAtSeconds = FPlatformTime::Seconds();
@@ -2518,14 +2590,17 @@ bool UDirectorBridgeSubsystem::IntegrateAndValidate()
 			LastGenerationValidation.Issues.Num(), RepairAttempt + 1));
 		GenerationIssueHistory.Append(LastGenerationValidation.Issues);
 		SaveValidationReport();
-		if (++RepairAttempt <= 2)
+		// A local population-bundle repair may intentionally leave an unrelated
+		// creative-section issue for the next targeted provider repair. Keep one
+		// bounded attempt in reserve for that mixed-section convergence path.
+		if (++RepairAttempt <= 3)
 		{
 			GenerationStage = EWorldDirectorGenerationStage::Repair;
 			RequestCurrentStage();
 			return false;
 		}
 		FinishGeneration(false,
-			TEXT("Integrated world remained invalid after two targeted repair attempts."));
+			TEXT("Integrated world remained invalid after three targeted repair attempts."));
 		return false;
 	}
 
@@ -2645,21 +2720,35 @@ bool UDirectorBridgeSubsystem::ApplyTargetedRepairs(
 	}
 	TSet<FString> AllowedSections;
 	TSet<FString> ExpectedTargets;
-	for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+	const bool bPopulationBundleRepair = RequiresPopulationBundleRepair(LastGenerationValidation);
+	if (bPopulationBundleRepair)
 	{
-		const FString Section = ValidationSection(Issue.Path);
-		if (!Section.IsEmpty() && Section != TEXT("$"))
+		for (const TCHAR* Section : {
+			TEXT("residents"), TEXT("households"), TEXT("relationships"),
+			TEXT("beliefs"), TEXT("events"), TEXT("changeProjects")})
 		{
 			AllowedSections.Add(Section);
-			int32 Index = INDEX_NONE;
-			const bool bHasIndex = TryGetTopLevelArrayIndex(Issue.Path, Section, Index);
-			ExpectedTargets.Add(Section + TEXT("|") +
-				(bHasIndex ? FString::FromInt(Index) : TEXT("*")));
-			if (Issue.Code.ToString() == TEXT("slice.resident_social_state") ||
-				(Section == TEXT("residents") && Issue.Path.Contains(TEXT(".beliefIds"))))
+			ExpectedTargets.Add(FString(Section) + TEXT("|*"));
+		}
+	}
+	else
+	{
+		for (const FValidationIssue& Issue : LastGenerationValidation.Issues)
+		{
+			const FString Section = ValidationSection(Issue.Path);
+			if (!Section.IsEmpty() && Section != TEXT("$"))
 			{
-				AllowedSections.Add(TEXT("beliefs"));
-				ExpectedTargets.Add(TEXT("beliefs|*"));
+				AllowedSections.Add(Section);
+				int32 Index = INDEX_NONE;
+				const bool bHasIndex = TryGetTopLevelArrayIndex(Issue.Path, Section, Index);
+				ExpectedTargets.Add(Section + TEXT("|") +
+					(bHasIndex ? FString::FromInt(Index) : TEXT("*")));
+				if (Issue.Code.ToString() == TEXT("slice.resident_social_state") ||
+					(Section == TEXT("residents") && Issue.Path.Contains(TEXT(".beliefIds"))))
+				{
+					AllowedSections.Add(TEXT("beliefs"));
+					ExpectedTargets.Add(TEXT("beliefs|*"));
+				}
 			}
 		}
 	}

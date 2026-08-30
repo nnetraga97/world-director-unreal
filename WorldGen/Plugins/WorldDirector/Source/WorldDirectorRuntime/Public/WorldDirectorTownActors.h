@@ -45,6 +45,7 @@ class WORLDDIRECTORRUNTIME_API AWorldDirectorDoorActor : public AActor
 
 public:
 	AWorldDirectorDoorActor();
+	virtual void NotifyActorOnClicked(FKey ButtonPressed) override;
 
 	UFUNCTION(BlueprintCallable, Category = "World Director|Door")
 	void SetDoorOpen(bool bOpen);

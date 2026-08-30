@@ -61,8 +61,6 @@ UButton* AddButton(UWidgetTree* Tree, UVerticalBox* Layout, const FString& Label
 }
 }
 
-using namespace WorldDirectorLoadingWidgetPrivate;
-
 void UWorldDirectorLoadingWidget::InitializeForBootstrap(AWorldDirectorFixtureBootstrap* InBootstrap)
 {
 	Bootstrap = InBootstrap;
@@ -126,26 +124,26 @@ void UWorldDirectorLoadingWidget::BuildWidgetTree()
 	CardSize->SetContent(Card);
 	UVerticalBox* Layout = WidgetTree->ConstructWidget<UVerticalBox>();
 	Card->SetContent(Layout);
-	AddText(WidgetTree, Layout, TEXT("WORLD DIRECTOR"), 12, AccentAmber);
-	TitleText = AddText(WidgetTree, Layout, TEXT("BUILDING YOUR WORLD"), 29, TextPrimary,
+	WorldDirectorLoadingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("WORLD DIRECTOR"), 12, WorldDirectorLoadingWidgetPrivate::AccentAmber);
+	TitleText = WorldDirectorLoadingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("BUILDING YOUR WORLD"), 29, WorldDirectorLoadingWidgetPrivate::TextPrimary,
 		FMargin(0.0f, 9.0f, 0.0f, 0.0f));
-	StageText = AddText(WidgetTree, Layout, TEXT("Preparing the director..."), 15, AccentBlue,
+	StageText = WorldDirectorLoadingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("Preparing the director..."), 15, WorldDirectorLoadingWidgetPrivate::AccentBlue,
 		FMargin(0.0f, 8.0f, 0.0f, 0.0f));
 	ProgressBar = WidgetTree->ConstructWidget<UProgressBar>();
 	ProgressBar->SetPercent(0.0f);
-	ProgressBar->SetFillColorAndOpacity(AccentBlue);
+	ProgressBar->SetFillColorAndOpacity(WorldDirectorLoadingWidgetPrivate::AccentBlue);
 	if (UVerticalBoxSlot* Slot = Layout->AddChildToVerticalBox(ProgressBar))
 	{
 		Slot->SetPadding(FMargin(0.0f, 24.0f, 0.0f, 0.0f));
 	}
-	DetailText = AddText(WidgetTree, Layout,
+	DetailText = WorldDirectorLoadingWidgetPrivate::AddText(WidgetTree, Layout,
 		TEXT("The current world remains safe while the next one is interpreted, validated, and compiled."),
-		13, TextSecondary, FMargin(0.0f, 13.0f, 0.0f, 0.0f));
-	CancelButton = AddButton(WidgetTree, Layout, TEXT("CANCEL GENERATION"), FLinearColor(0.28f, 0.08f, 0.07f, 1.0f));
+		13, WorldDirectorLoadingWidgetPrivate::TextSecondary, FMargin(0.0f, 13.0f, 0.0f, 0.0f));
+	CancelButton = WorldDirectorLoadingWidgetPrivate::AddButton(WidgetTree, Layout, TEXT("CANCEL GENERATION"), FLinearColor(0.28f, 0.08f, 0.07f, 1.0f));
 	CancelButton->OnClicked.AddDynamic(this, &UWorldDirectorLoadingWidget::CancelGeneration);
-	DiagnosticsButton = AddButton(WidgetTree, Layout, TEXT("OPEN AI DIAGNOSTICS"), FLinearColor(0.08f, 0.21f, 0.29f, 1.0f));
+	DiagnosticsButton = WorldDirectorLoadingWidgetPrivate::AddButton(WidgetTree, Layout, TEXT("OPEN AI DIAGNOSTICS"), FLinearColor(0.08f, 0.21f, 0.29f, 1.0f));
 	DiagnosticsButton->OnClicked.AddDynamic(this, &UWorldDirectorLoadingWidget::OpenDiagnostics);
-	AddText(WidgetTree, Layout, TEXT("Generation can take several minutes in live model mode."), 11, TextMuted,
+	WorldDirectorLoadingWidgetPrivate::AddText(WidgetTree, Layout, TEXT("Generation can take several minutes in live model mode."), 11, WorldDirectorLoadingWidgetPrivate::TextMuted,
 		FMargin(0.0f, 18.0f, 0.0f, 0.0f));
 }
 
@@ -173,7 +171,7 @@ void UWorldDirectorLoadingWidget::RefreshLoadingState()
 		DetailText->SetText(FText::FromString(
 			TEXT("Spawning the terrain, locations, residents, and simulation state for a safe first look.")));
 		ProgressBar->SetPercent(SampleProgress);
-		ProgressBar->SetFillColorAndOpacity(AccentAmber);
+		ProgressBar->SetFillColorAndOpacity(WorldDirectorLoadingWidgetPrivate::AccentAmber);
 		if (CancelButton != nullptr) CancelButton->SetVisibility(ESlateVisibility::Collapsed);
 		if (DiagnosticsButton != nullptr) DiagnosticsButton->SetVisibility(ESlateVisibility::Collapsed);
 		return;
@@ -203,7 +201,7 @@ void UWorldDirectorLoadingWidget::RefreshLoadingState()
 		Bridge->GetGenerationRunId().IsEmpty() ? TEXT("starting") : *Bridge->GetGenerationRunId(),
 		Bridge->GetGenerationElapsedSeconds())));
 	ProgressBar->SetPercent(Progress);
-	ProgressBar->SetFillColorAndOpacity(AccentBlue);
+	ProgressBar->SetFillColorAndOpacity(WorldDirectorLoadingWidgetPrivate::AccentBlue);
 }
 
 void UWorldDirectorLoadingWidget::CancelGeneration()
