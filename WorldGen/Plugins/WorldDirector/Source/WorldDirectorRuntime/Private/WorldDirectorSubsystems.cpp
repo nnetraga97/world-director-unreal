@@ -2615,6 +2615,10 @@ void UDirectorBridgeSubsystem::HandleStageResponse(
 		Diagnostics->TryGetStringField(TEXT("telemetryPath"), Metric.TelemetryPath);
 		Diagnostics->TryGetStringField(TEXT("costNote"), Metric.CostNote);
 		double Number = 0.0;
+		if (Diagnostics->TryGetNumberField(TEXT("billedCostUsd"), Number))
+		{
+			Metric.BilledCostUsd = Number;
+		}
 		if (Diagnostics->TryGetNumberField(TEXT("inputTokens"), Number))
 		{
 			Metric.InputTokens = static_cast<int64>(Number);
@@ -3357,6 +3361,25 @@ void UDirectorBridgeSubsystem::RecordPlayability(const FWorldDirectorPlayability
 	SaveRunSummary();
 }
 
+/** Total cost the provider reported, or why there is none: the Codex CLI never reports one. */
+static FString DescribeProviderCost(
+	const TArray<FWorldDirectorGenerationStageMetric>& Metrics, double& OutTotalUsd, bool& bOutReported)
+{
+	OutTotalUsd = 0.0;
+	bOutReported = false;
+	for (const FWorldDirectorGenerationStageMetric& Metric : Metrics)
+	{
+		if (Metric.BilledCostUsd >= 0.0)
+		{
+			OutTotalUsd += Metric.BilledCostUsd;
+			bOutReported = true;
+		}
+	}
+	return bOutReported
+		? FString::Printf(TEXT("$%.4f (Claude Code CLI estimate at API prices)"), OutTotalUsd)
+		: TEXT("unavailable; Codex CLI does not report a monetary charge");
+}
+
 FString UDirectorBridgeSubsystem::BuildGenerationDiagnosticReport() const
 {
 	int64 TotalInputTokens = 0;
@@ -3370,13 +3393,16 @@ FString UDirectorBridgeSubsystem::BuildGenerationDiagnosticReport() const
 		TotalOutputTokens += Metric.OutputTokens;
 		TotalReasoningTokens += Metric.ReasoningOutputTokens;
 	}
+	double TotalCostUsd = 0.0;
+	bool bCostReported = false;
+	const FString CostText = DescribeProviderCost(GenerationMetrics, TotalCostUsd, bCostReported);
 	FString Report = FString::Printf(
 		TEXT("WORLD DIRECTOR AI GENERATION\n"
 			"State: %s\nProvider: %s\nModel: %s\nReasoning effort: %s\n"
 			"Run: %s\nRun folder: %s\nElapsed: %.2f seconds\nPrompt characters: %d\n"
 			"Seed: %d\nRepairs: %d\nValidation issues: %d\nSelected layout: %s\n"
 			"Tokens: input=%lld (cached=%lld) output=%lld reasoning=%lld\n"
-			"Provider-billed cost: unavailable; Codex CLI does not report a monetary charge.\n\n"
+			"Provider-billed cost: %s\n\n"
 			"STAGE METRICS\n"),
 		*StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(static_cast<int64>(GenerationStage)),
 		*ProviderName,
@@ -3385,7 +3411,7 @@ FString UDirectorBridgeSubsystem::BuildGenerationDiagnosticReport() const
 		*GenerationRunId, *GenerationRunDirectory, GetGenerationElapsedSeconds(),
 		GenerationPlayerPrompt.Len(), GenerationSeed, RepairAttempt, GenerationIssueHistory.Num(),
 		*SelectedLayoutCandidateId, TotalInputTokens, TotalCachedInputTokens,
-		TotalOutputTokens, TotalReasoningTokens);
+		TotalOutputTokens, TotalReasoningTokens, *CostText);
 	for (const FWorldDirectorGenerationStageMetric& Metric : GenerationMetrics)
 	{
 		const FString ExitLabel = Metric.ExitCode == INDEX_NONE
@@ -3460,8 +3486,14 @@ void UDirectorBridgeSubsystem::SaveRunSummary() const
 		GenerationModel.IsEmpty() ? TEXT("CLI default (not reported)") : GenerationModel);
 	Summary->SetStringField(TEXT("reasoningEffort"),
 		GenerationReasoningEffort.IsEmpty() ? TEXT("CLI default") : GenerationReasoningEffort);
+	double TotalCostUsd = 0.0;
+	bool bCostReported = false;
 	Summary->SetStringField(TEXT("providerBilledCost"),
-		TEXT("unavailable: Codex CLI does not report a monetary charge"));
+		DescribeProviderCost(GenerationMetrics, TotalCostUsd, bCostReported));
+	if (bCostReported)
+	{
+		Summary->SetNumberField(TEXT("providerBilledCostUsd"), TotalCostUsd);
+	}
 	Summary->SetStringField(TEXT("state"),
 		StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(static_cast<int64>(GenerationStage)));
 	const FString Outcome = RuntimeCompileState == TEXT("Failed")
@@ -3568,6 +3600,10 @@ void UDirectorBridgeSubsystem::SaveRunSummary() const
 			TEXT("reasoningOutputTokens"), static_cast<double>(Metric.ReasoningOutputTokens));
 		Item->SetNumberField(TEXT("promptCharacters"), static_cast<double>(Metric.PromptCharacters));
 		Item->SetStringField(TEXT("costNote"), Metric.CostNote);
+		if (Metric.BilledCostUsd >= 0.0)
+		{
+			Item->SetNumberField(TEXT("billedCostUsd"), Metric.BilledCostUsd);
+		}
 		Metrics.Add(MakeShared<FJsonValueObject>(Item));
 	}
 	Summary->SetArrayField(TEXT("stages"), Metrics);

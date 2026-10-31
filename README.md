@@ -17,7 +17,7 @@ The model is concentrated where it creates visible value: place identity, landfo
 
 ## Current functionality
 
-- Player-facing **Create World** flow; the model list is read from the installed Codex CLI's catalog.
+- Player-facing **Create World** flow; the model list is read from the installed Codex CLI's catalog, plus Claude models (`claude-opus`, `claude-sonnet`, `claude-fable`, `claude-haiku`) through the Claude Code CLI when it is installed.
 - Asynchronous local CLI companion with cancellation, a total run budget, per-stage timeouts, and teardown-safe callbacks.
 - Two creative model stages (interpretation and topology) whose output is constrained by the provider's structured output (`--output-schema`), followed by deterministic layout selection, topology-derived population synthesis, integration, bounded repair, runtime compilation, and a recorded playability check.
 - Seeded V3 physical generation across a 1.2 km domain: composable macroforms, thermal erosion, connected water, terrain-aware districts and plots, graded routes, coherent farms, and layered biome dressing.
@@ -52,6 +52,7 @@ initial_plan.md                                Original vertical-slice execution
 - macOS/Xcode for the currently verified build path. Xcode 27 ships without the Metal Toolchain; install it once with `xcodebuild -downloadComponent MetalToolchain` or shader compilation and rendered captures fail with "missing Metal Toolchain"
 - Git LFS for `.uasset` and `.umap` files
 - A locally authenticated Codex CLI with `exec --output-schema` (verified with 0.166.0) only when intentionally testing real AI generation. Update it with `npm install -g @openai/codex@latest`; the game reads available models from `~/.codex/models_cache.json`, and `[WorldDirector] DefaultModel` in `Config/DefaultGame.ini` picks the default
+- Or the Claude Code CLI (the engine behind the Claude Agent SDK), signed in with `claude auth login` or with `ANTHROPIC_API_KEY` set, to generate with Claude instead. Pick a `claude-` model in Create World, or set `DefaultModel=claude-opus`. See `Docs/WorldDirector/StagedGeneration.md`
 
 The repository intentionally excludes locally installed Fab/marketplace packs. The active `Profile.StylizedVillage` references the installed `Fantastic_Village_Pack`, while other downloaded construction, cabin, western, and science-fiction environments remain optional local experiments and are not mixed into that profile. Restore required marketplace content through the account that owns its license.
 
@@ -89,7 +90,9 @@ The primary test map is:
 
 Within Create World, `Ctrl+Enter` starts generation. In Diagnostics, `Ctrl+Left` and `Ctrl+Right` change the selected stage and `Ctrl+C` copies the visible report.
 
-On the landing screen, choose a completed world and select `LOAD SELECTED WORLD` to rebuild it from its local replay recipe. On the settlement map, hover a location marker for details, left-click to set or move a waypoint, and right-click to clear the waypoint.
+On the landing screen, choose a completed world and select `LOAD SELECTED WORLD` to rebuild it from its local replay recipe.
+
+The settlement map (`M`) is a straight-down render of the town as built: real roofs, roads, walls and fields, with north (world +X) up. Building names, district rings and roads from the plan are drawn over it, and a side panel lists the layout: landform, districts, building count, roads, perimeter and waterfront. It opens framed on the town. Drag to pan, scroll or press `+`/`-` to zoom, `F` to frame the town again, `T` to show the whole terrain (piers can sit a few hundred metres out on the nearest shore), `V` to switch between the top-down render and the plain schematic, and `L` to hide or show building names. Hover a marker for details, click to set or move a waypoint, and right-click to clear it. The line on your marker shows which way you are facing.
 
 Click a resident while the interaction cursor is enabled to open dialogue.
 
@@ -137,7 +140,7 @@ rebuilt from the already-installed certified textures by running
 `UnrealEditor-Cmd`; the script does not download or generate artwork.
 
 For deterministic visual review, add `-WorldDirectorVisualCapture` and one of
-`-WorldDirectorVisualView=overview|approach|landmark|civic|topdown|eye|street|district|overlook`
+`-WorldDirectorVisualView=overview|approach|landmark|civic|topdown|eye|street|district|overlook|map`
 when launching `L_WorldDirectorTown`. Add `-WorldDirectorVisualOutput=/absolute/path.png`
 to choose the screenshot destination. This path always uses the local fixture and
 does not invoke the configured model. Captures are taken at noon unless the world's
@@ -149,7 +152,7 @@ appears on stderr). The harness now decodes the frame it wrote and fails with
 `reason=blank_frame` rather than reporting success for an empty image, so a missing
 `-RenderOffScreen` shows up as a capture failure instead of a passing black frame.
 
-The first five views are elevated (3.6 m to 300 m up). `eye`, `street`, `district`
+`map` opens the settlement map and keeps the UI in the screenshot. The first five views are elevated (3.6 m to 300 m up). `eye`, `street`, `district`
 and `overlook` line-trace the collision surface and stand the camera 170 cm above
 it, which is the only way ground-level terrain and composition defects are visible.
 

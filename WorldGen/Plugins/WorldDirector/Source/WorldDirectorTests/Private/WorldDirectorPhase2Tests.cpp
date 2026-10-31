@@ -4,12 +4,14 @@
 
 #include "Interfaces/IPluginManager.h"
 #include "Dom/JsonObject.h"
+#include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "WorldDirectorJson.h"
 #include "WorldDirectorCompiler.h"
+#include "WorldDirectorGeneration.h"
 #include "WorldDirectorPhysicalGenerator.h"
 #include "WorldDirectorPresentation.h"
 #include "WorldDirectorTownActors.h"
@@ -2358,6 +2360,41 @@ bool FWorldDirectorPresentationWaterTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("corpus includes water landforms"), WaterWorlds > 0);
 	TestTrue(TEXT("most water worlds get piers"), WaterWorldsWithPiers * 2 >= WaterWorlds && WaterWorldsWithPiers > 0);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FWorldDirectorClaudeModelCatalogTest,
+	"WorldDirector.Generation.ClaudeModelsFollowCodex",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWorldDirectorClaudeModelCatalogTest::RunTest(const FString& Parameters)
+{
+	const FString PreviousPath = FPlatformMisc::GetEnvironmentVariable(TEXT("WORLD_DIRECTOR_CLAUDE_PATH"));
+	const FString FakeClaude = FPaths::CreateTempFilename(*FPaths::ProjectIntermediateDir(), TEXT("claude-"));
+	FFileHelper::SaveStringToFile(TEXT("stand-in"), *FakeClaude);
+	const auto CountClaude = [](const TArray<FWorldDirectorModelOption>& Catalog)
+	{
+		return Catalog.FilterByPredicate(
+			[](const FWorldDirectorModelOption& Option) { return Option.Slug.StartsWith(TEXT("claude-")); }).Num();
+	};
+
+	FPlatformMisc::SetEnvironmentVar(TEXT("WORLD_DIRECTOR_CLAUDE_PATH"), *FakeClaude);
+	const TArray<FWorldDirectorModelOption> WithClaude = LoadWorldDirectorModelCatalog();
+	const int32 CodexCount = LoadCodexModelCatalog().Num();
+	TestEqual(TEXT("an installed Claude Code CLI adds the four Claude aliases"), CountClaude(WithClaude), 4);
+	TestEqual(TEXT("Codex models keep their place ahead of Claude"), WithClaude.Num(), CodexCount + 4);
+	if (WithClaude.Num() == CodexCount + 4)
+	{
+		TestEqual(TEXT("the first Claude entry follows the Codex catalog"), WithClaude[CodexCount].Slug, FString(TEXT("claude-opus")));
+		TestTrue(TEXT("Claude models offer medium effort"), WithClaude[CodexCount].ReasoningEfforts.Contains(TEXT("medium")));
+	}
+
+	FPlatformMisc::SetEnvironmentVar(TEXT("WORLD_DIRECTOR_CLAUDE_PATH"), *(FakeClaude + TEXT(".missing")));
+	TestEqual(TEXT("no Claude models without the CLI"), CountClaude(LoadWorldDirectorModelCatalog()), 0);
+
+	FPlatformMisc::SetEnvironmentVar(TEXT("WORLD_DIRECTOR_CLAUDE_PATH"), *PreviousPath);
+	IFileManager::Get().Delete(*FakeClaude);
 	return !HasAnyErrors();
 }
 

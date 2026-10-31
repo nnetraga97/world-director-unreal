@@ -57,6 +57,16 @@ package-manager runtime paths needed by script launchers such as Homebrew Codex.
 It uses Codex's ephemeral read-only mode and ignores optional user config while
 retaining authentication; deterministic fixture mode is test-only.
 
+## 2026-10-31: Claude models through the Claude Code CLI
+
+Claude support calls the Claude Code CLI (`claude -p --json-schema`) rather than
+importing the Python Claude Agent SDK. The SDK is a wrapper that launches the same
+CLI, but it needs Python 3.10+ and pip, while Unreal launches the companion with
+the system `/usr/bin/python3` (3.9) and the companion has no third-party
+dependencies. Authentication is the user's Claude Code sign-in or
+`ANTHROPIC_API_KEY`. The integration is covered by tests against a stand-in
+executable only; no live Claude call was made while building it.
+
 ## 2026-08-22: layout-candidate validity boundary
 
 Unreal produces opaque candidate IDs only after the accepted topology resolves

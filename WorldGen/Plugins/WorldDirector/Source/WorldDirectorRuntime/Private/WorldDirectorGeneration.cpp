@@ -180,6 +180,60 @@ private:
 	FCriticalSection RequestsMutex;
 	TArray<TSharedRef<FCompanionRequestState>> Requests;
 };
+
+/** Mirrors discover_claude() in the companion, for the menu's purposes. */
+bool IsClaudeCodeInstalled()
+{
+	const FString Configured = FPlatformMisc::GetEnvironmentVariable(TEXT("WORLD_DIRECTOR_CLAUDE_PATH"));
+	if (!Configured.IsEmpty())
+	{
+		return FPaths::FileExists(Configured);
+	}
+	const FString Home = FPlatformProcess::UserHomeDir();
+	const FString Candidates[] = {
+		FPaths::Combine(Home, TEXT(".local/bin/claude")),
+		FPaths::Combine(Home, TEXT(".claude/local/claude")),
+		FPaths::Combine(Home, TEXT(".npm-global/bin/claude")),
+		TEXT("/opt/homebrew/bin/claude"),
+		TEXT("/usr/local/bin/claude"),
+	};
+	for (const FString& Candidate : Candidates)
+	{
+		if (FPaths::FileExists(Candidate))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Claude models run through the Claude Code CLI, the engine behind the Claude Agent SDK.
+ * The slugs name the CLI's aliases, which always resolve to the newest model in each
+ * family, so the menu cannot go stale the way hardcoded Codex names did.
+ */
+void AppendClaudeModels(TArray<FWorldDirectorModelOption>& Options)
+{
+	if (!IsClaudeCodeInstalled())
+	{
+		return;
+	}
+	static const TCHAR* const ClaudeModels[][2] = {
+		{ TEXT("claude-opus"), TEXT("Claude Opus (latest)") },
+		{ TEXT("claude-sonnet"), TEXT("Claude Sonnet (latest)") },
+		{ TEXT("claude-fable"), TEXT("Claude Fable (latest)") },
+		{ TEXT("claude-haiku"), TEXT("Claude Haiku (latest)") },
+	};
+	for (const auto& Model : ClaudeModels)
+	{
+		FWorldDirectorModelOption& Option = Options.AddDefaulted_GetRef();
+		Option.Slug = Model[0];
+		Option.DisplayName = Model[1];
+		Option.Description = TEXT("Runs through the Claude Code CLI with your Claude sign-in, or ANTHROPIC_API_KEY when set.");
+		Option.ReasoningEfforts = { TEXT("low"), TEXT("medium"), TEXT("high") };
+		Option.DefaultReasoningEffort = TEXT("medium");
+	}
+}
 }
 
 TSharedRef<IWorldDirectorProvider> CreateWorldDirectorLocalCompanionProvider()
@@ -188,6 +242,13 @@ TSharedRef<IWorldDirectorProvider> CreateWorldDirectorLocalCompanionProvider()
 }
 
 TArray<FWorldDirectorModelOption> LoadWorldDirectorModelCatalog()
+{
+	TArray<FWorldDirectorModelOption> Options = LoadCodexModelCatalog();
+	AppendClaudeModels(Options);
+	return Options;
+}
+
+TArray<FWorldDirectorModelOption> LoadCodexModelCatalog()
 {
 	TArray<FWorldDirectorModelOption> Options;
 	FString CodexHome = FPlatformMisc::GetEnvironmentVariable(TEXT("CODEX_HOME"));

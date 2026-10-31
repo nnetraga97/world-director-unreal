@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 
 COMPANION_PATH = (
@@ -735,6 +736,125 @@ class CompanionContractTests(unittest.TestCase):
                 os.environ.pop("WORLD_DIRECTOR_CLI_COMMAND", None)
             else:
                 os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = previous
+
+    def _run_fake_claude(
+        self, directory: Path, request: dict, result: dict, exit_code: int = 0
+    ) -> tuple[dict, dict]:
+        """Run cli_response against a stand-in `claude` that records how it was called."""
+        record_path = directory / "record.json"
+        result_path = directory / "result.json"
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        script = directory / "claude"
+        script.write_text(
+            f"#!{sys.executable}\n"
+            + textwrap.dedent(
+                """
+                import json, os, sys
+                from pathlib import Path
+                prompt = sys.stdin.read()
+                Path(os.environ["FAKE_CLAUDE_RECORD"]).write_text(json.dumps({
+                    "argv": sys.argv[1:], "cwd": os.getcwd(),
+                    "cwdEntries": os.listdir("."), "prompt": prompt}))
+                print(Path(os.environ["FAKE_CLAUDE_RESULT"]).read_text())
+                sys.exit(int(os.environ["FAKE_CLAUDE_EXIT"]))
+                """
+            ),
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        environment = {
+            "WORLD_DIRECTOR_CLAUDE_PATH": str(script),
+            "FAKE_CLAUDE_RECORD": str(record_path),
+            "FAKE_CLAUDE_RESULT": str(result_path),
+            "FAKE_CLAUDE_EXIT": str(exit_code),
+        }
+        with mock.patch.dict(os.environ, environment):
+            os.environ.pop("WORLD_DIRECTOR_CLI_COMMAND", None)
+            response = COMPANION.cli_response(request, directory / "interpret-response.json")
+        return response, json.loads(record_path.read_text(encoding="utf-8"))
+
+    def test_claude_models_run_the_claude_cli_with_the_stage_schema(self) -> None:
+        self.assertEqual(COMPANION.model_provider("claude-sonnet"), "claude")
+        self.assertEqual(COMPANION.model_provider("gpt-6.1-sol"), "codex")
+        request = request_for("interpret")
+        request["providerMode"] = "cli"
+        request["model"] = "claude-sonnet"
+        request["reasoningEffort"] = "medium"
+        request["companionTimeoutSeconds"] = 10
+        result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": "session-1",
+            "result": "",
+            "structured_output": COMPANION.fixture_response(request),
+            "total_cost_usd": 0.0123,
+            "usage": {
+                "input_tokens": 100,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 300,
+                "output_tokens": 50,
+                "output_tokens_details": {"thinking_tokens": 10},
+            },
+            "modelUsage": {"claude-sonnet-5-5": {}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            response, record = self._run_fake_claude(Path(directory), request, result)
+        self.assertEqual(response["stage"], "interpret")
+        argv = record["argv"]
+        self.assertIn("-p", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertEqual(argv[argv.index("--effort") + 1], "medium")
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+        for isolation_flag in ("--safe-mode", "--strict-mcp-config", "--no-session-persistence"):
+            self.assertIn(isolation_flag, argv)
+        schema = json.loads(argv[argv.index("--json-schema") + 1])
+        self.assertEqual(schema["properties"]["stage"]["const"], "interpret")
+        self.assertEqual(record["cwdEntries"], [])
+        self.assertNotEqual(Path(record["cwd"]).resolve(), Path.cwd().resolve())
+        self.assertNotIn("Stage-specific JSON Schema", record["prompt"])
+        diagnostics = response["diagnostics"]
+        self.assertEqual(diagnostics["provider"], "claude")
+        self.assertEqual(diagnostics["threadId"], "session-1")
+        self.assertEqual(diagnostics["inputTokens"], 420)
+        self.assertEqual(diagnostics["cachedInputTokens"], 300)
+        self.assertEqual(diagnostics["outputTokens"], 50)
+        self.assertEqual(diagnostics["reasoningOutputTokens"], 10)
+        self.assertEqual(diagnostics["resolvedModel"], "claude-sonnet-5-5")
+        self.assertAlmostEqual(diagnostics["billedCostUsd"], 0.0123)
+
+    def test_full_claude_model_names_reach_the_cli_unchanged(self) -> None:
+        request = request_for("interpret")
+        request["providerMode"] = "cli"
+        request["model"] = "claude-opus-5-5"
+        request["companionTimeoutSeconds"] = 10
+        result = {"type": "result", "subtype": "success", "is_error": False,
+                  "structured_output": COMPANION.fixture_response(request)}
+        with tempfile.TemporaryDirectory() as directory:
+            response, record = self._run_fake_claude(Path(directory), request, result)
+        argv = record["argv"]
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-5-5")
+        self.assertNotIn("--effort", argv)
+        self.assertIsNone(response["diagnostics"]["billedCostUsd"])
+
+    def test_claude_cli_failure_reports_its_own_message(self) -> None:
+        request = request_for("interpret")
+        request["providerMode"] = "cli"
+        request["model"] = "claude-opus"
+        request["providerMaxAttempts"] = 1
+        request["companionTimeoutSeconds"] = 10
+        # The CLI reports a failed sign-in with subtype "success" and is_error true.
+        result = {"type": "result", "subtype": "success", "is_error": True,
+                  "result": "Failed to authenticate: OAuth session expired", "total_cost_usd": 0}
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "Failed to authenticate"):
+                self._run_fake_claude(Path(directory), request, result, exit_code=1)
+            telemetry = json.loads(
+                Path(directory, "interpret-telemetry.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(telemetry["companionOutcome"], "provider_error")
+        self.assertEqual(telemetry["provider"], "claude")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,9 @@
 """One-shot local bridge between Unreal and a configured CLI agent.
 
 The Unreal provider owns cancellation and timeout enforcement. This process owns
-prompt construction and invokes the CLI once for exactly one generation stage.
+prompt construction and invokes the CLI once for exactly one generation stage:
+the Codex CLI by default, or the Claude Code CLI (the engine behind the Claude Agent
+SDK) when the requested model is a claude- slug.
 """
 
 from __future__ import annotations
@@ -136,6 +138,22 @@ CODEX_DISABLED_FEATURES = (
     "skill_search",
     "skill_mcp_dependency_install",
     "plugin_discovery_prefetch",
+)
+
+# Claude models are chosen with a claude- slug. These name the Claude Code CLI's aliases,
+# which always resolve to the newest model in each family; any other claude- slug (for
+# example claude-opus-5-5) is passed to the CLI as a full model name.
+CLAUDE_MODEL_ALIASES = {
+    "claude-fable": "fable",
+    "claude-opus": "opus",
+    "claude-sonnet": "sonnet",
+    "claude-haiku": "haiku",
+}
+# Replaces Claude Code's coding-agent system prompt; the stage instructions arrive on stdin.
+CLAUDE_SYSTEM_PROMPT = (
+    "You are one stage of World Director, which turns a player's prompt into a playable "
+    "Unreal Engine town. Follow the stage instructions in the user message and return the "
+    "complete stage response through the StructuredOutput tool. Do not reply in prose."
 )
 
 # Keywords that never belong in an output schema sent to the provider's strict
@@ -928,33 +946,50 @@ def strip_code_fence(text: str) -> str:
     return cleaned.strip()
 
 
-def discover_codex() -> str | None:
-    """Find Codex even when Unreal was launched with Finder's minimal PATH."""
-    discovered = shutil.which("codex")
+def _discover_executable(name: str, extra_candidates: list[Path]) -> str | None:
+    """Find a CLI even when Unreal was launched with Finder's minimal PATH."""
+    discovered = shutil.which(name)
     if discovered:
         return discovered
 
     home = Path.home()
     candidates = [
-        Path("/opt/homebrew/bin/codex"),
-        Path("/usr/local/bin/codex"),
-        home / ".local/bin/codex",
-        home / ".npm-global/bin/codex",
+        Path("/opt/homebrew/bin") / name,
+        Path("/usr/local/bin") / name,
+        home / ".local/bin" / name,
+        home / ".npm-global/bin" / name,
+        *extra_candidates,
     ]
-    if sys.platform == "darwin":
-        candidates.extend(
-            [
-                Path("/Applications/Codex.app/Contents/Resources/codex"),
-                Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
-                home / "Applications/Codex.app/Contents/Resources/codex",
-                home / "Applications/ChatGPT.app/Contents/Resources/codex",
-            ]
-        )
-
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return None
+
+
+def discover_codex() -> str | None:
+    home = Path.home()
+    app_candidates = []
+    if sys.platform == "darwin":
+        app_candidates = [
+            Path("/Applications/Codex.app/Contents/Resources/codex"),
+            Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+            home / "Applications/Codex.app/Contents/Resources/codex",
+            home / "Applications/ChatGPT.app/Contents/Resources/codex",
+        ]
+    return _discover_executable("codex", app_candidates)
+
+
+def discover_claude() -> str | None:
+    """Find the Claude Code CLI; WORLD_DIRECTOR_CLAUDE_PATH overrides the search."""
+    configured = os.environ.get("WORLD_DIRECTOR_CLAUDE_PATH", "").strip()
+    if configured:
+        return str(Path(configured).expanduser())
+    return _discover_executable("claude", [Path.home() / ".claude/local/claude"])
+
+
+def model_provider(model: str) -> str:
+    """A claude- slug selects the Claude Code CLI; every other model goes to Codex."""
+    return "claude" if model.startswith("claude-") else "codex"
 
 
 def agent_environment(executable: str) -> dict[str, str]:
@@ -1020,6 +1055,94 @@ def parse_provider_events(events_text: str) -> dict:
             except (TypeError, ValueError):
                 telemetry["usageAvailable"] = False
     return telemetry
+
+
+def parse_claude_result(stdout_text: str) -> tuple[str, dict, str]:
+    """Read `claude -p --output-format json` output as (answer JSON, telemetry, error).
+
+    The CLI checks the answer against --json-schema and returns it as structured_output.
+    A failed run can still report subtype "success", so is_error decides.
+    """
+    telemetry: dict = {
+        "threadId": "",
+        "inputTokens": 0,
+        "cachedInputTokens": 0,
+        "outputTokens": 0,
+        "reasoningOutputTokens": 0,
+        "eventCount": 0,
+        "malformedEventCount": 0,
+        "usageAvailable": False,
+        "costUsd": None,
+        "resolvedModel": "",
+    }
+    try:
+        result = json.loads(stdout_text) if stdout_text.strip() else None
+    except json.JSONDecodeError:
+        result = None
+    if not isinstance(result, dict):
+        telemetry["malformedEventCount"] = 1 if stdout_text.strip() else 0
+        return "", telemetry, "the Claude Code CLI did not print a JSON result"
+    telemetry["eventCount"] = 1
+    telemetry["threadId"] = str(result.get("session_id", ""))
+    usage = result.get("usage")
+    if isinstance(usage, dict):
+        try:
+            cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+            # Codex counts cached tokens inside inputTokens; match that.
+            telemetry["inputTokens"] = (
+                int(usage.get("input_tokens", 0) or 0)
+                + int(usage.get("cache_creation_input_tokens", 0) or 0)
+                + cache_read
+            )
+            telemetry["cachedInputTokens"] = cache_read
+            telemetry["outputTokens"] = int(usage.get("output_tokens", 0) or 0)
+            details = usage.get("output_tokens_details")
+            if isinstance(details, dict):
+                telemetry["reasoningOutputTokens"] = int(details.get("thinking_tokens", 0) or 0)
+            telemetry["usageAvailable"] = True
+        except (TypeError, ValueError):
+            telemetry["usageAvailable"] = False
+    cost = result.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        telemetry["costUsd"] = float(cost)
+    model_usage = result.get("modelUsage")
+    if isinstance(model_usage, dict):
+        telemetry["resolvedModel"] = ",".join(sorted(str(name) for name in model_usage))
+    if result.get("is_error") or result.get("subtype", "success") != "success":
+        detail = result.get("result") or result.get("errors") or "no detail"
+        return "", telemetry, (
+            f"Claude Code CLI failed ({result.get('subtype', 'error')}): {str(detail)[:1500]}"
+        )
+    structured = result.get("structured_output")
+    if isinstance(structured, dict):
+        return json.dumps(structured), telemetry, ""
+    text = result.get("result")
+    if isinstance(text, str) and text.strip():
+        return text, telemetry, ""
+    return "", telemetry, "the Claude Code CLI returned no structured output"
+
+
+def provider_cost_fields(provider: str, usage: dict) -> dict:
+    if provider == "claude" and usage.get("costUsd") is not None:
+        return {
+            "billedCostUsd": usage["costUsd"],
+            "costNote": (
+                f"Claude Code CLI estimate at API prices: ${usage['costUsd']:.4f}. Billed "
+                "with an API key; on a Claude subscription it counts toward plan limits."
+            ),
+        }
+    if provider == "claude":
+        return {
+            "billedCostUsd": None,
+            "costNote": "Unavailable: the Claude Code CLI did not report a cost for this run.",
+        }
+    return {
+        "billedCostUsd": None,
+        "costNote": (
+            "Unavailable: the Codex CLI reports tokens but does not emit a "
+            "monetary charge for this authenticated run."
+        ),
+    }
 
 
 def validate_stage_response(request: dict, response: dict) -> dict:
@@ -2336,6 +2459,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
     if reasoning_effort not in {"", "low", "medium", "high", "xhigh", "max", "ultra"}:
         raise ValueError("unsupported reasoning effort")
     structured_output = not configured
+    provider = "configured" if configured else model_provider(requested_model)
     if configured:
         command = shlex.split(configured)
         command = [
@@ -2344,8 +2468,45 @@ def cli_response(request: dict, output_path: Path) -> dict:
             )
             for argument in command
         ]
-        # A configured provider opts into structured output by accepting {schema}.
-        structured_output = any("{schema}" in argument for argument in command)
+        # A configured provider opts into structured output by accepting {schema}
+        # (a file path) or {schema_json} (the schema text).
+        structured_output = any(
+            "{schema}" in argument or "{schema_json}" in argument for argument in command
+        )
+    elif provider == "claude":
+        claude = discover_claude()
+        if not claude:
+            raise RuntimeError(
+                "A Claude model was selected but the Claude Code CLI was not found. Install "
+                "it (https://claude.com/claude-code) and sign in with `claude auth login`, "
+                "or set WORLD_DIRECTOR_CLAUDE_PATH."
+            )
+        # The same isolation as the Codex path: an empty working directory with no
+        # built-in tools, MCP servers, skills, hooks, CLAUDE.md or saved session. The CLI
+        # adds its StructuredOutput tool and checks the answer against the stage schema.
+        # Auth is the user's Claude Code sign-in, or ANTHROPIC_API_KEY when set.
+        command = [
+            claude,
+            "-p",
+            "--output-format",
+            "json",
+            "--json-schema",
+            "{schema_json}",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--safe-mode",
+            "--no-session-persistence",
+            "--disable-slash-commands",
+            "--permission-prompts",
+            "none",
+            "--system-prompt",
+            CLAUDE_SYSTEM_PROMPT,
+            "--model",
+            CLAUDE_MODEL_ALIASES.get(requested_model, requested_model),
+        ]
+        if reasoning_effort:
+            command.extend(["--effort", reasoning_effort])
     else:
         codex = discover_codex()
         if not codex:
@@ -2431,6 +2592,8 @@ def cli_response(request: dict, output_path: Path) -> dict:
         "outputTokens": 0,
         "reasoningOutputTokens": 0,
     }
+    # Claude reports a cost per call; a corrective retry is a second call.
+    total_cost_usd: float | None = None
     correction = ""
     last_error: Exception | None = None
     global _ACTIVE_AGENT_PROCESS, _ACTIVE_TELEMETRY_PATH
@@ -2467,10 +2630,12 @@ def cli_response(request: dict, output_path: Path) -> dict:
             schema_path.write_text(output_schema_json, encoding="utf-8")
             work_directory = Path(temp_dir) / "workdir"
             work_directory.mkdir()
+            # The schema text goes in last so nothing inside it is mistaken for a placeholder.
             expanded = [
                 arg.replace("{output}", str(agent_output))
                 .replace("{schema}", str(schema_path))
                 .replace("{workdir}", str(work_directory))
+                .replace("{schema_json}", output_schema_json)
                 for arg in command
             ]
             _ACTIVE_TELEMETRY_PATH = telemetry_path
@@ -2482,6 +2647,8 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 stderr=subprocess.PIPE,
                 text=True,
                 env=agent_environment(command[0]),
+                # Codex takes --cd; Claude Code works in its current directory.
+                cwd=str(work_directory) if provider == "claude" else None,
                 start_new_session=(os.name == "posix"),
                 creationflags=(
                     getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -2505,12 +2672,21 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 _ACTIVE_TELEMETRY_PATH = None
             return_code = process.returncode
             stdout_text = stdout or ""
-            raw_response = agent_output.read_text(encoding="utf-8") if agent_output.exists() else ""
-            # Codex emits JSONL telemetry on stdout and writes the answer to {output}.
-            # A provider-neutral sandbox command may instead emit only its answer on stdout.
-            provider_events = stdout_text if raw_response else ""
-            if not raw_response and configured:
-                raw_response = stdout_text
+            provider_error = ""
+            if provider == "claude":
+                # Claude Code prints one JSON result holding the answer and its usage.
+                raw_response, usage, provider_error = parse_claude_result(stdout_text)
+                provider_events = stdout_text
+            else:
+                raw_response = (
+                    agent_output.read_text(encoding="utf-8") if agent_output.exists() else ""
+                )
+                # Codex emits JSONL telemetry on stdout and writes the answer to {output}.
+                # A provider-neutral sandbox command may instead emit only its answer on stdout.
+                provider_events = stdout_text if raw_response else ""
+                if not raw_response and configured:
+                    raw_response = stdout_text
+                usage = parse_provider_events(provider_events)
 
         previous_attempt_seconds = time.perf_counter() - attempt_started
         events_path.write_text(provider_events, encoding="utf-8")
@@ -2523,9 +2699,10 @@ def cli_response(request: dict, output_path: Path) -> dict:
         )
         attempt_events_path.write_text(provider_events, encoding="utf-8")
         attempt_raw_path.write_text(raw_response, encoding="utf-8")
-        usage = parse_provider_events(provider_events)
         for key in totals:
             totals[key] += int(usage.get(key, 0) or 0)
+        if usage.get("costUsd") is not None:
+            total_cost_usd = (total_cost_usd or 0.0) + float(usage["costUsd"])
         record = {
             "providerAttempt": provider_attempt,
             "durationSeconds": time.perf_counter() - attempt_started,
@@ -2538,6 +2715,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
             "cachedInputTokens": usage.get("cachedInputTokens", 0),
             "outputTokens": usage.get("outputTokens", 0),
             "reasoningOutputTokens": usage.get("reasoningOutputTokens", 0),
+            "costUsd": usage.get("costUsd"),
             "promptPath": str(attempt_prompt_path),
             "rawResponsePath": str(attempt_raw_path),
             "providerEventsPath": str(attempt_events_path),
@@ -2552,6 +2730,8 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 raise RuntimeError(
                     f"CLI agent exceeded the companion timeout of {timeout_seconds:.1f} seconds."
                 )
+            if provider_error:
+                raise RuntimeError(provider_error)
             if return_code != 0:
                 raise RuntimeError(
                     f"configured CLI agent exited {return_code}: {(stderr or '')[-2000:]}"
@@ -2590,6 +2770,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "providerStderr": (stderr or "")[-8000:],
                 "timedOut": False,
                 "timeoutSeconds": timeout_seconds,
+                "provider": provider,
                 "structuredOutput": structured_output,
                 "parseSuccess": True,
                 "schemaSuccess": True,
@@ -2597,11 +2778,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "providerAttempts": attempt_records,
                 "normalizationChanges": normalization_changes,
                 "companionOutcome": "success",
-                "billedCostUsd": None,
-                "costNote": (
-                    "Unavailable: the Codex CLI reports tokens but does not emit a "
-                    "monetary charge for this authenticated run."
-                ),
+                **provider_cost_fields(provider, {"costUsd": total_cost_usd}),
             }
             telemetry_path.write_text(
                 json.dumps(telemetry, indent=2) + "\n", encoding="utf-8"
@@ -2612,7 +2789,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
             last_error = exc
             record["outcome"] = (
                 "provider_timeout" if timed_out else
-                "provider_error" if return_code != 0 else
+                "provider_error" if return_code != 0 or provider_error else
                 "response_validation_error"
             )
             record["error"] = str(exc)[:2000]
@@ -2633,6 +2810,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "exitCode": return_code,
                 "timedOut": timed_out,
                 "timeoutSeconds": timeout_seconds,
+                "provider": provider,
                 "structuredOutput": structured_output,
                 "parseSuccess": record["parseSuccess"],
                 "schemaSuccess": False,
@@ -2640,11 +2818,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "providerAttempts": attempt_records,
                 "companionOutcome": record["outcome"],
                 "responseValidationError": str(exc)[:2000],
-                "billedCostUsd": None,
-                "costNote": (
-                    "Unavailable: the Codex CLI reports tokens but does not emit a "
-                    "monetary charge for this authenticated run."
-                ),
+                **provider_cost_fields(provider, {"costUsd": total_cost_usd}),
             }
             telemetry_path.write_text(
                 json.dumps(failure_telemetry, indent=2) + "\n", encoding="utf-8"

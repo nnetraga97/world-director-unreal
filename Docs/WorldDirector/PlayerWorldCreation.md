@@ -6,7 +6,10 @@ prompt or leave it blank, choose a reproducible positive seed, and select
 the Codex model and reasoning effort before selecting **Create World**. The
 model list comes from the installed Codex CLI's catalog; the default is
 `[WorldDirector] DefaultModel` in `Config/DefaultGame.ini` (`gpt-6.1-sol`,
-`medium`) when Codex serves it, otherwise the first catalog model. The
+`medium`) when Codex serves it, otherwise the first catalog model. When the
+Claude Code CLI is installed the list also offers `claude-opus`,
+`claude-sonnet`, `claude-fable` and `claude-haiku`, which generate through
+`claude -p` instead (see `StagedGeneration.md`). The
 default path invokes the real local CLI companion. The clearly labelled debug
 checkbox uses the deterministic fixture and never calls a model.
 

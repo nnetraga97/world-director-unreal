@@ -135,6 +135,10 @@ struct WORLDDIRECTORRUNTIME_API FWorldDirectorGenerationStageMetric
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
 	FString CostNote;
+
+	/** Cost the provider reported for this stage (the Claude Code CLI does), or negative. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	double BilledCostUsd = -1.0;
 };
 
 struct FWorldDirectorProviderResponse
@@ -169,7 +173,7 @@ public:
 
 WORLDDIRECTORRUNTIME_API TSharedRef<IWorldDirectorProvider> CreateWorldDirectorLocalCompanionProvider();
 
-/** A model the installed Codex CLI currently serves, read from its own model catalog. */
+/** A model the generator can call: one the installed Codex CLI serves, or a Claude model. */
 struct FWorldDirectorModelOption
 {
 	FString Slug;
@@ -181,13 +185,20 @@ struct FWorldDirectorModelOption
 };
 
 /**
+ * The Codex catalog followed by the Claude models (claude-opus, claude-sonnet, claude-fable,
+ * claude-haiku) when the Claude Code CLI is installed. The companion sends claude- models
+ * to `claude -p` and everything else to Codex.
+ */
+WORLDDIRECTORRUNTIME_API TArray<FWorldDirectorModelOption> LoadWorldDirectorModelCatalog();
+
+/**
  * Lists visible models from $CODEX_HOME/models_cache.json (default ~/.codex). Model names
  * change between Codex releases; hardcoding them is what left the menu offering retired
  * models. Returns an empty array when Codex has not cached a catalog yet.
  */
-WORLDDIRECTORRUNTIME_API TArray<FWorldDirectorModelOption> LoadWorldDirectorModelCatalog();
+WORLDDIRECTORRUNTIME_API TArray<FWorldDirectorModelOption> LoadCodexModelCatalog();
 
-/** [WorldDirector] DefaultModel from Game config if Codex serves it, else the first catalog model. */
+/** [WorldDirector] DefaultModel from Game config if the catalog offers it, else the first catalog model. */
 WORLDDIRECTORRUNTIME_API FString GetWorldDirectorDefaultModel();
 
 /** [WorldDirector] DefaultReasoningEffort if the model supports it, else the model's own default. */

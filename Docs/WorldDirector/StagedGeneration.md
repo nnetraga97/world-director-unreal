@@ -89,15 +89,47 @@ with `exec --output-schema` (verified with 0.166.0). Each stage call:
 Responses are parsed strictly (duplicate keys and non-standard numbers are
 rejected); there is no text-level repair of malformed JSON.
 
-Set `WORLD_DIRECTOR_CLI_COMMAND` to replace the CLI command. The command may use
-`{output}` for the last-message file, `{model}`, `{reasoning}`, and `{schema}`
-for the output-schema file. A configured command that uses `{schema}` gets the
-schema as a file; one that does not gets it in the prompt instead.
+### Claude models
 
-The Create World menu lists the models in Codex's catalog, offers reasoning
-`low`/`medium`/`high` where the model supports it, and defaults to
-`[WorldDirector] DefaultModel` / `DefaultReasoningEffort` in
-`Config/DefaultGame.ini` when Codex still serves that model.
+A model slug starting with `claude-` sends the stage to the Claude Code CLI
+(`claude -p`), the engine the Claude Agent SDK wraps, instead of Codex. Calling
+the CLI directly keeps the companion dependency-free on the system
+`/usr/bin/python3` (3.9); the Python Agent SDK needs Python 3.10+ and pip. The
+menu offers `claude-opus`, `claude-sonnet`, `claude-fable` and `claude-haiku`,
+which map to the CLI's aliases for the newest model in each family; any other
+`claude-` slug (for example `claude-opus-5-5`) is passed through as a full model
+name. Each call:
+
+* passes the same projected stage schema as `--json-schema`; the CLI adds its
+  `StructuredOutput` tool, validates the answer against the schema and returns
+  it as `structured_output`. The canonical schema is still enforced locally;
+* runs in an empty temporary working directory with `--tools ""` (no built-in
+  tools), `--strict-mcp-config`, `--safe-mode` (no CLAUDE.md, skills, hooks or
+  plugins), `--no-session-persistence`, and a short `--system-prompt` in place
+  of Claude Code's coding-agent prompt;
+* maps the reasoning effort to `--effort`;
+* records the CLI's token usage and `total_cost_usd`. Cost is an estimate at API
+  prices: billed with `ANTHROPIC_API_KEY`, or counted toward plan limits on a
+  Claude subscription. Run summaries show the summed estimate as
+  `providerBilledCost`.
+
+Authentication is the user's own: sign in once with `claude auth login`, or set
+`ANTHROPIC_API_KEY`. A failed sign-in surfaces as the stage error (the CLI
+reports it with `is_error: true`). The menu shows Claude models only when the
+CLI is found in `~/.local/bin`, `~/.claude/local`, `~/.npm-global/bin`,
+`/opt/homebrew/bin` or `/usr/local/bin`; `WORLD_DIRECTOR_CLAUDE_PATH` points at
+another install.
+
+Set `WORLD_DIRECTOR_CLI_COMMAND` to replace the CLI command. The command may use
+`{output}` for the last-message file, `{model}`, `{reasoning}`, `{schema}` for
+the output-schema file, and `{schema_json}` for the schema text. A configured
+command that uses either schema placeholder gets the schema that way; one that
+does not gets it in the prompt instead.
+
+The Create World menu lists the models in Codex's catalog followed by the
+Claude models, offers reasoning `low`/`medium`/`high` where the model supports
+it, and defaults to `[WorldDirector] DefaultModel` / `DefaultReasoningEffort` in
+`Config/DefaultGame.ini` when the menu offers that model.
 
 The deterministic fixture mode exists only for automated lifecycle and repair
 tests. Normal gameplay uses the CLI path.

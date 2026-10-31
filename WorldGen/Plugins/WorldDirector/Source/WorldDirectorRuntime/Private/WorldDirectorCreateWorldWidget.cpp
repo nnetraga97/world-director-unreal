@@ -270,8 +270,9 @@ void UWorldDirectorCreateWorldWidget::BuildWidgetTree()
 	UVerticalBox* ModelField = AddField(
 		WidgetTree, Fields, TEXT("Model"), TEXT("Balances generation quality and speed."), 225.0f);
 	ModelInput = WidgetTree->ConstructWidget<UComboBoxString>();
-	// Models come from the installed Codex catalog so the menu never offers a model
-	// Codex has retired. An empty catalog leaves one blank option (Codex's default).
+	// Models come from the installed Codex catalog, so the menu never offers a model
+	// Codex has retired, plus the Claude models when the Claude Code CLI is installed.
+	// An empty catalog leaves one blank option (Codex's default).
 	for (const FWorldDirectorModelOption& Option : LoadWorldDirectorModelCatalog())
 	{
 		ModelInput->AddOption(Option.Slug);
@@ -284,7 +285,7 @@ void UWorldDirectorCreateWorldWidget::BuildWidgetTree()
 	ModelInput->SetSelectedOption(
 		ModelInput->FindOptionIndex(DefaultModel) != INDEX_NONE ? DefaultModel : ModelInput->GetOptionAtIndex(0));
 	ModelInput->SetToolTipText(FText::FromString(
-		TEXT("Models the installed Codex CLI currently serves. The default comes from [WorldDirector] DefaultModel in DefaultGame.ini.")));
+		TEXT("Models the installed Codex CLI currently serves, and claude- models when the Claude Code CLI is installed (sign in with `claude auth login`). The default comes from [WorldDirector] DefaultModel in DefaultGame.ini.")));
 	ModelField->AddChildToVerticalBox(ModelInput);
 
 	UVerticalBox* ReasoningField = AddField(

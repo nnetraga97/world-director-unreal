@@ -4567,7 +4567,7 @@ void AWorldDirectorFixtureBootstrap::RunAutomatedVisualCapture()
 			TEXT("WORLD_DIRECTOR_VISUAL_EYE view=%s groundZ=%.0f eyeZ=%.0f"),
 			*AutomatedVisualCaptureView, StandGround, CameraLocation.Z);
 	}
-	else if (AutomatedVisualCaptureView == TEXT("topdown"))
+	else if (AutomatedVisualCaptureView == TEXT("topdown") || AutomatedVisualCaptureView == TEXT("map"))
 	{
 		CameraTarget = SettlementFocus;
 		CameraLocation = CameraTarget + FVector(0.0f, 0.0f,
@@ -4610,6 +4610,11 @@ void AWorldDirectorFixtureBootstrap::RunAutomatedVisualCapture()
 	CaptureCamera->GetCameraComponent()->SetConstraintAspectRatio(false);
 	PlayerController->SetViewTargetWithBlend(CaptureCamera, 0.0f);
 	PlayerController->bShowMouseCursor = false;
+	if (AutomatedVisualCaptureView == TEXT("map"))
+	{
+		// The map is UI over the scene; the screenshot below keeps the UI for this view.
+		OpenMapView();
+	}
 
 	AutomatedVisualCapturePath = FPaths::Combine(
 		FPaths::ProjectSavedDir(), TEXT("Screenshots/Mac/WorldDirectorPhase4.png"));
@@ -4658,7 +4663,8 @@ void AWorldDirectorFixtureBootstrap::CaptureAutomatedVisualFrame()
 		FGenericPlatformMisc::RequestExitWithStatus(false, 5);
 		return;
 	}
-	FScreenshotRequest::RequestScreenshot(AutomatedVisualCapturePath, false, false);
+	FScreenshotRequest::RequestScreenshot(
+		AutomatedVisualCapturePath, AutomatedVisualCaptureView == TEXT("map"), false);
 	UE_LOG(LogWorldDirector, Display,
 		TEXT("WORLD_DIRECTOR_VISUAL_CAPTURE_REQUESTED view=%s path=%s"),
 		*AutomatedVisualCaptureView, *AutomatedVisualCapturePath);
