@@ -270,14 +270,21 @@ void UWorldDirectorCreateWorldWidget::BuildWidgetTree()
 	UVerticalBox* ModelField = AddField(
 		WidgetTree, Fields, TEXT("Model"), TEXT("Balances generation quality and speed."), 225.0f);
 	ModelInput = WidgetTree->ConstructWidget<UComboBoxString>();
-	for (const TCHAR* Model : {
-		TEXT("gpt-5.6-terra"), TEXT("gpt-5.6-sol"), TEXT("gpt-5.6-luna"), TEXT("gpt-5.5") })
+	// Models come from the installed Codex catalog so the menu never offers a model
+	// Codex has retired. An empty catalog leaves one blank option (Codex's default).
+	for (const FWorldDirectorModelOption& Option : LoadWorldDirectorModelCatalog())
 	{
-		ModelInput->AddOption(Model);
+		ModelInput->AddOption(Option.Slug);
 	}
-	ModelInput->SetSelectedOption(TEXT("gpt-5.6-luna"));
+	const FString DefaultModel = GetWorldDirectorDefaultModel();
+	if (ModelInput->GetOptionCount() == 0)
+	{
+		ModelInput->AddOption(DefaultModel);
+	}
+	ModelInput->SetSelectedOption(
+		ModelInput->FindOptionIndex(DefaultModel) != INDEX_NONE ? DefaultModel : ModelInput->GetOptionAtIndex(0));
 	ModelInput->SetToolTipText(FText::FromString(
-		TEXT("AI model used for semantic world planning. Luna is the default for richer world coherence.")));
+		TEXT("Models the installed Codex CLI currently serves. The default comes from [WorldDirector] DefaultModel in DefaultGame.ini.")));
 	ModelField->AddChildToVerticalBox(ModelInput);
 
 	UVerticalBox* ReasoningField = AddField(
@@ -286,7 +293,7 @@ void UWorldDirectorCreateWorldWidget::BuildWidgetTree()
 	RefreshReasoningOptions(ModelInput->GetSelectedOption());
 	ModelInput->OnSelectionChanged.AddDynamic(this, &UWorldDirectorCreateWorldWidget::HandleModelChanged);
 	ReasoningInput->SetToolTipText(FText::FromString(
-		TEXT("Reasoning effort requested from the selected model. High is the default for Luna.")));
+		TEXT("Reasoning effort for the selected model, capped at high so a run fits its time budget.")));
 	ReasoningField->AddChildToVerticalBox(ReasoningInput);
 
 	FixtureCheck = WidgetTree->ConstructWidget<UCheckBox>();
@@ -478,23 +485,25 @@ void UWorldDirectorCreateWorldWidget::RefreshReasoningOptions(const FString& Sel
 	}
 	const FString PreviousSelection = ReasoningInput->GetSelectedOption();
 	ReasoningInput->ClearOptions();
-	for (const TCHAR* Effort : { TEXT("low"), TEXT("medium"), TEXT("high"), TEXT("xhigh") })
+	TArray<FString> Efforts = {TEXT("low"), TEXT("medium"), TEXT("high")};
+	for (const FWorldDirectorModelOption& Option : LoadWorldDirectorModelCatalog())
+	{
+		if (Option.Slug == SelectedModel && !Option.ReasoningEfforts.IsEmpty())
+		{
+			Efforts = Option.ReasoningEfforts;
+			break;
+		}
+	}
+	for (const FString& Effort : Efforts)
 	{
 		ReasoningInput->AddOption(Effort);
 	}
-	if (SelectedModel.StartsWith(TEXT("gpt-5.6")))
-	{
-		ReasoningInput->AddOption(TEXT("max"));
-		if (!SelectedModel.Contains(TEXT("luna"), ESearchCase::IgnoreCase))
-		{
-			ReasoningInput->AddOption(TEXT("ultra"));
-		}
-	}
+	const FString DefaultEffort = GetWorldDirectorDefaultReasoningEffort(SelectedModel);
 	ReasoningInput->SetSelectedOption(
 		ReasoningInput->FindOptionIndex(PreviousSelection) != INDEX_NONE
 			? PreviousSelection
-			: (SelectedModel.Contains(TEXT("luna"), ESearchCase::IgnoreCase)
-				? TEXT("high") : TEXT("medium")));
+			: (ReasoningInput->FindOptionIndex(DefaultEffort) != INDEX_NONE
+				? DefaultEffort : ReasoningInput->GetOptionAtIndex(0)));
 }
 
 void UWorldDirectorCreateWorldWidget::UpdatePromptCharacterCount()

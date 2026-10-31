@@ -3,6 +3,7 @@
 #include "IPlatformCrypto.h"
 #include "Math/RandomStream.h"
 #include "WorldDirectorRuntime.h"
+#include "WorldDirectorPresentation.h"
 #include "WorldEnvironmentProfile.h"
 
 namespace
@@ -153,28 +154,161 @@ float RiverCenterInFrame(const float Along, const int32 Seed)
 		0.028f * FMath::Sin(Along * 9.1f - Phase * 0.63f);
 }
 
+// Only three certified public shells exist, so the yard beside each public
+// building carries its trade. Returns up to three placement tags drawn from the
+// profile's existing dressing palette; no new asset is introduced.
+TArray<FName> ResolveWorkYardTags(const FString& LowerIdentity, const FName PurposeTag)
+{
+	auto Has = [&LowerIdentity](std::initializer_list<const TCHAR*> Words)
+	{
+		for (const TCHAR* Word : Words)
+		{
+			if (LowerIdentity.Contains(Word))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	if (Has({TEXT("farm"), TEXT("field"), TEXT("granary"), TEXT("grain"), TEXT("mill"), TEXT("barn"),
+		TEXT("orchard"), TEXT("pasture"), TEXT("harvest"), TEXT("garden"), TEXT("paddy"), TEXT("flax")}))
+	{
+		return {TEXT("Dressing.FarmAccent"), TEXT("Dressing.Transport"), TEXT("Dressing.SettlementClutter")};
+	}
+	if (Has({TEXT("dock"), TEXT("harbor"), TEXT("quay"), TEXT("boat"), TEXT("ferry"), TEXT("fish"),
+		TEXT("wharf"), TEXT("landing"), TEXT("salt"), TEXT("weir")}))
+	{
+		return {TEXT("Dressing.Transport"), TEXT("Dressing.SettlementClutter"), TEXT("Dressing.InnYard")};
+	}
+	if (Has({TEXT("watch"), TEXT("gate"), TEXT("guard"), TEXT("tower"), TEXT("beacon"), TEXT("fort"),
+		TEXT("lookout"), TEXT("barracks"), TEXT("wall")}))
+	{
+		return {TEXT("Dressing.GuildBanner"), TEXT("Dressing.Roadside")};
+	}
+	if (Has({TEXT("shrine"), TEXT("temple"), TEXT("chapel"), TEXT("spring"), TEXT("well"), TEXT("bell"),
+		TEXT("oracle"), TEXT("sacred"), TEXT("tree")}))
+	{
+		return {TEXT("Dressing.CivicSeat"), TEXT("Dressing.CommunalFire"), TEXT("Dressing.Roadside")};
+	}
+	if (Has({TEXT("herb"), TEXT("clinic"), TEXT("heal"), TEXT("apothecary"), TEXT("infirmary"),
+		TEXT("physic")}) || PurposeTag == TEXT("Purpose.Clinic"))
+	{
+		return {TEXT("Dressing.SettlementClutter"), TEXT("Dressing.CivicSeat")};
+	}
+	if (Has({TEXT("smith"), TEXT("forge"), TEXT("workshop"), TEXT("works"), TEXT("yard"), TEXT("quarry"),
+		TEXT("mine"), TEXT("kiln"), TEXT("timber"), TEXT("saw"), TEXT("carpent"), TEXT("store")}))
+	{
+		return {TEXT("Dressing.SettlementClutter"), TEXT("Dressing.Transport"), TEXT("Dressing.SettlementClutter")};
+	}
+	if (Has({TEXT("hall"), TEXT("council"), TEXT("court"), TEXT("reeve"), TEXT("archive"), TEXT("moot")}) ||
+		PurposeTag == TEXT("Purpose.Headquarters"))
+	{
+		return {TEXT("Dressing.GuildBanner"), TEXT("Dressing.CivicSeat")};
+	}
+	if (PurposeTag == TEXT("Purpose.Shelter"))
+	{
+		return {TEXT("Dressing.CommunalFire"), TEXT("Dressing.SettlementClutter")};
+	}
+	return {TEXT("Dressing.SettlementClutter")};
+}
+
+bool IsNegatedMention(const FString& Text, const int32 KeywordStart)
+{
+	// Only look back within the current clause: "a ridge, not a coast" negates
+	// coast, but "no trees. A ridge town" does not negate ridge.
+	int32 ClauseStart = KeywordStart;
+	while (ClauseStart > 0 && KeywordStart - ClauseStart < 48)
+	{
+		const TCHAR Previous = Text[ClauseStart - 1];
+		if (Previous == TEXT('.') || Previous == TEXT(',') || Previous == TEXT(';') ||
+			Previous == TEXT(':') || Previous == TEXT('/') || Previous == TEXT('\n'))
+		{
+			break;
+		}
+		--ClauseStart;
+	}
+	const FString Clause = TEXT(" ") + Text.Mid(ClauseStart, KeywordStart - ClauseStart);
+	static const TCHAR* const Negations[] = {
+		TEXT(" no "), TEXT(" not "), TEXT(" without "), TEXT(" replacing "), TEXT(" instead of "),
+		TEXT(" rather than "), TEXT(" competing "), TEXT(" avoid "), TEXT(" never "), TEXT(" non-")
+	};
+	for (const TCHAR* Negation : Negations)
+	{
+		if (Clause.Contains(Negation))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 EWorldDirectorTerrainArchetype ResolveArchetype(const FWorldBrief& Brief, const int32 Seed)
 {
-	FString Intent = FString::Join(Brief.TerrainPreferences, TEXT(" ")).ToLower();
-	if (Intent.Contains(TEXT("coast")) || Intent.Contains(TEXT("shore")) || Intent.Contains(TEXT("harbor")))
+	EWorldDirectorTerrainArchetype Archetype = EWorldDirectorTerrainArchetype::Basin;
+	if (FWorldDirectorPhysicalGenerator::TryParseLandform(Brief.Landform, &Archetype))
 	{
-		return EWorldDirectorTerrainArchetype::Coast;
+		return Archetype;
 	}
-	if (Intent.Contains(TEXT("marsh")) || Intent.Contains(TEXT("reed")) || Intent.Contains(TEXT("flood")))
+
+	// Legacy briefs only describe terrain in prose. The earliest unnegated
+	// landform word is the one the brief committed to; a fixed priority order
+	// let incidental words ("old flood scars", "replacing coastal terrain")
+	// override the stated landform.
+	struct FKeyword
 	{
-		return EWorldDirectorTerrainArchetype::Marsh;
+		const TCHAR* Word;
+		EWorldDirectorTerrainArchetype Archetype;
+	};
+	static const FKeyword Keywords[] = {
+		{TEXT("coast"), EWorldDirectorTerrainArchetype::Coast},
+		{TEXT("shore"), EWorldDirectorTerrainArchetype::Coast},
+		{TEXT("harbor"), EWorldDirectorTerrainArchetype::Coast},
+		{TEXT("marsh"), EWorldDirectorTerrainArchetype::Marsh},
+		{TEXT("reed"), EWorldDirectorTerrainArchetype::Marsh},
+		{TEXT("flood"), EWorldDirectorTerrainArchetype::Marsh},
+		{TEXT("ridge"), EWorldDirectorTerrainArchetype::Ridge},
+		{TEXT("hill"), EWorldDirectorTerrainArchetype::Ridge},
+		{TEXT("mountain"), EWorldDirectorTerrainArchetype::Ridge},
+		{TEXT("valley"), EWorldDirectorTerrainArchetype::Valley},
+		{TEXT("pass"), EWorldDirectorTerrainArchetype::Valley},
+		{TEXT("terrace"), EWorldDirectorTerrainArchetype::Valley},
+		{TEXT("basin"), EWorldDirectorTerrainArchetype::Basin},
+		{TEXT("bowl"), EWorldDirectorTerrainArchetype::Basin},
+		{TEXT("caldera"), EWorldDirectorTerrainArchetype::Basin}
+	};
+	const FString Intent = FString::Join(Brief.TerrainPreferences, TEXT(". ")).ToLower();
+	int32 EarliestPosition = MAX_int32;
+	bool bFound = false;
+	for (const FKeyword& Keyword : Keywords)
+	{
+		int32 SearchFrom = 0;
+		while (SearchFrom < Intent.Len())
+		{
+			const int32 Position = Intent.Find(
+				Keyword.Word, ESearchCase::CaseSensitive, ESearchDir::FromStart, SearchFrom);
+			if (Position == INDEX_NONE || Position >= EarliestPosition)
+			{
+				break;
+			}
+			SearchFrom = Position + 1;
+			// Match whole-word starts only, so "uphill" is not "hill".
+			if (Position > 0 && FChar::IsAlpha(Intent[Position - 1]))
+			{
+				continue;
+			}
+			if (IsNegatedMention(Intent, Position))
+			{
+				continue;
+			}
+			EarliestPosition = Position;
+			Archetype = Keyword.Archetype;
+			bFound = true;
+			break;
+		}
 	}
-	if (Intent.Contains(TEXT("ridge")) || Intent.Contains(TEXT("hill")) || Intent.Contains(TEXT("mountain")))
+	if (bFound)
 	{
-		return EWorldDirectorTerrainArchetype::Ridge;
-	}
-	if (Intent.Contains(TEXT("valley")) || Intent.Contains(TEXT("pass")) || Intent.Contains(TEXT("terrace")))
-	{
-		return EWorldDirectorTerrainArchetype::Valley;
-	}
-	if (Intent.Contains(TEXT("basin")) || Intent.Contains(TEXT("bowl")))
-	{
-		return EWorldDirectorTerrainArchetype::Basin;
+		return Archetype;
 	}
 	const uint32 Magnitude = Seed < 0
 		? 0U - static_cast<uint32>(Seed) : static_cast<uint32>(Seed);
@@ -911,6 +1045,21 @@ TArray<FVector2D> FindTerrainRoute(
 	const FIntPoint EndGrid = ToGrid(End);
 	const int32 StartIndex = StartGrid.Y * RouteGridResolution + StartGrid.X;
 	const int32 EndIndex = EndGrid.Y * RouteGridResolution + EndGrid.X;
+	// Snapping the gates onto the lattice can put the start or goal node inside a
+	// reserved plot envelope (the endpoint's own or a neighbor's padding). Every
+	// segment touching such a node intersects the box, so the search could never
+	// leave the start or reach the goal and fell back to a straight chord. Allow
+	// leaving a box that contains the start node and entering one that contains
+	// the goal node; the refinement pass below still rejects cuts through plots.
+	const FVector2D StartNodePosition = ToWorld(StartIndex);
+	const FVector2D EndNodePosition = ToWorld(EndIndex);
+	TArray<bool> EndpointBox;
+	EndpointBox.Init(false, Occupied.Num());
+	for (int32 BoxIndex = 0; BoxIndex < Occupied.Num(); ++BoxIndex)
+	{
+		EndpointBox[BoxIndex] = BoxIndex == StartOccupiedIndex || BoxIndex == EndOccupiedIndex ||
+			Occupied[BoxIndex].IsInside(StartNodePosition) || Occupied[BoxIndex].IsInside(EndNodePosition);
+	}
 	TArray<float> Cost;
 	Cost.Init(MAX_flt, NodeCount);
 	TArray<int32> Previous;
@@ -982,7 +1131,14 @@ TArray<FVector2D> FindTerrainRoute(
 			bool bBlockedByPlot = false;
 			for (int32 BoxIndex = 0; BoxIndex < Occupied.Num(); ++BoxIndex)
 			{
-				if (SegmentIntersectsBox2D(CurrentPosition, Position, Occupied[BoxIndex]))
+				const FBox2D& Box = Occupied[BoxIndex];
+				if (!SegmentIntersectsBox2D(CurrentPosition, Position, Box))
+				{
+					continue;
+				}
+				const bool bLeavingEndpointBox = EndpointBox[BoxIndex] && Box.IsInside(CurrentPosition);
+				const bool bEnteringGoalBox = EndpointBox[BoxIndex] && Neighbor == EndIndex;
+				if (!bLeavingEndpointBox && !bEnteringGoalBox)
 				{
 					bBlockedByPlot = true;
 					break;
@@ -1282,6 +1438,44 @@ FString FWorldDirectorPhysicalGenerator::FingerprintBytes(const TArray<uint8>& B
 	return BytesToHex(Hash.GetData(), Hash.Num()).ToLower();
 }
 
+bool FWorldDirectorPhysicalGenerator::TryParseLandform(
+	const FString& Landform,
+	EWorldDirectorTerrainArchetype* OutArchetype)
+{
+	struct FLandformName
+	{
+		const TCHAR* Name;
+		EWorldDirectorTerrainArchetype Archetype;
+	};
+	static const FLandformName Names[] = {
+		{TEXT("basin"), EWorldDirectorTerrainArchetype::Basin},
+		{TEXT("valley"), EWorldDirectorTerrainArchetype::Valley},
+		{TEXT("ridge"), EWorldDirectorTerrainArchetype::Ridge},
+		{TEXT("coast"), EWorldDirectorTerrainArchetype::Coast},
+		{TEXT("marsh"), EWorldDirectorTerrainArchetype::Marsh}
+	};
+	const FString Trimmed = Landform.TrimStartAndEnd();
+	for (const FLandformName& Name : Names)
+	{
+		if (Trimmed.Equals(Name.Name, ESearchCase::IgnoreCase))
+		{
+			if (OutArchetype != nullptr)
+			{
+				*OutArchetype = Name.Archetype;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+EWorldDirectorTerrainArchetype FWorldDirectorPhysicalGenerator::ResolveTerrainArchetype(
+	const FWorldBrief& Brief,
+	const int32 Seed)
+{
+	return ResolveArchetype(Brief, Seed);
+}
+
 int32 FWorldDirectorPhysicalGenerator::DeriveStageSeed(
 	const int32 RootSeed,
 	const FString& StageName,
@@ -1342,6 +1536,779 @@ float FWorldDirectorPhysicalGenerator::SampleSlopeDegrees(
 	return FMath::RadiansToDegrees(FMath::Atan(FMath::Sqrt(DX * DX + DY * DY)));
 }
 
+namespace
+{
+struct FPresentationCounts
+{
+	int32 WallSegments = 0;
+	int32 FenceSegments = 0;
+	int32 Gates = 0;
+	int32 Towers = 0;
+	int32 Barricades = 0;
+	int32 Banners = 0;
+	int32 Piers = 0;
+	int32 Boats = 0;
+	int32 BridgePieces = 0;
+	int32 Dockside = 0;
+	int32 Gallows = 0;
+	int32 Guillotines = 0;
+	int32 Coffins = 0;
+	int32 Braziers = 0;
+	int32 Watchfires = 0;
+	int32 SmokeColumns = 0;
+	int32 BurntPiles = 0;
+};
+
+TArray<FVector2D> ConvexHull(TArray<FVector2D> Points)
+{
+	Points.Sort([](const FVector2D& A, const FVector2D& B)
+	{
+		return A.X != B.X ? A.X < B.X : A.Y < B.Y;
+	});
+	if (Points.Num() < 3)
+	{
+		return Points;
+	}
+	auto Cross = [](const FVector2D& O, const FVector2D& A, const FVector2D& B)
+	{
+		return (A.X - O.X) * (B.Y - O.Y) - (A.Y - O.Y) * (B.X - O.X);
+	};
+	TArray<FVector2D> Hull;
+	Hull.SetNum(Points.Num() * 2);
+	int32 Count = 0;
+	for (int32 Index = 0; Index < Points.Num(); ++Index)
+	{
+		while (Count >= 2 && Cross(Hull[Count - 2], Hull[Count - 1], Points[Index]) <= 0.0f)
+		{
+			--Count;
+		}
+		Hull[Count++] = Points[Index];
+	}
+	for (int32 Index = Points.Num() - 2, Lower = Count + 1; Index >= 0; --Index)
+	{
+		while (Count >= Lower && Cross(Hull[Count - 2], Hull[Count - 1], Points[Index]) <= 0.0f)
+		{
+			--Count;
+		}
+		Hull[Count++] = Points[Index];
+	}
+	Hull.SetNum(Count - 1);
+	return Hull;
+}
+
+FString DescribeCounts(std::initializer_list<TPair<const TCHAR*, int32>> Parts)
+{
+	TArray<FString> Described;
+	for (const TPair<const TCHAR*, int32>& Part : Parts)
+	{
+		if (Part.Value > 0)
+		{
+			Described.Add(FString::Printf(TEXT("%d %s"), Part.Value, Part.Key));
+		}
+	}
+	return Described.IsEmpty() ? FString() : FString::Join(Described, TEXT(", ")) + TEXT(".");
+}
+}
+
+/**
+ * Turns brief.presentation into pack dressing and features. It draws from its own seed
+ * stream and appends after every other dressing pass, so a default presentation leaves
+ * existing worlds (and their fingerprints) exactly as they were.
+ */
+static void PlacePresentationFeatures(
+	const FGeneratedWorldSpec& Spec,
+	const UWorldEnvironmentProfile* Profile,
+	const FVector2D& CivicCore,
+	const float SettlementRadius,
+	const TArray<FString>& OverriddenFields,
+	FResolvedWorldPlan& InOutPlan)
+{
+	const FWorldPresentation& Presentation = InOutPlan.Presentation;
+	const FWorldDirectorTerrainRecipe& Terrain = InOutPlan.Terrain;
+	FRandomStream Random(FWorldDirectorPhysicalGenerator::DeriveStageSeed(Spec.Seed, TEXT("presentation")));
+	FPresentationCounts Placed;
+
+	auto Height = [&Terrain](const FVector2D& Position)
+	{
+		return static_cast<float>(FWorldDirectorPhysicalGenerator::SampleHeightCentimeters(Terrain, Position));
+	};
+	auto Slope = [&Terrain](const FVector2D& Position)
+	{
+		return FWorldDirectorPhysicalGenerator::SampleSlopeDegrees(Terrain, Position);
+	};
+	auto IsDry = [&](const FVector2D& Position, const float Margin)
+	{
+		return Terrain.WaterLevelCentimeters == INDEX_NONE || Height(Position) > Terrain.WaterLevelCentimeters + Margin;
+	};
+	auto InBounds = [](const FVector2D& Position, const float Margin)
+	{
+		return FMath::Max(FMath::Abs(Position.X), FMath::Abs(Position.Y)) <= TerrainExtent - Margin;
+	};
+	auto InFarm = [&Terrain](const FVector2D& Position)
+	{
+		for (const FWorldDirectorFarmParcel& Parcel : Terrain.FarmParcels)
+		{
+			if (IsInsidePolygon(Position, Parcel.BoundaryPoints))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
+	auto AddMesh = [&](const FName PlacementTag, const FVector& Position, const float Yaw, const FName BiomeTag) -> bool
+	{
+		const FWorldEnvironmentDressingAsset* Asset = PickDressingAsset(Profile, PlacementTag, Random);
+		if (Asset == nullptr)
+		{
+			return false;
+		}
+		FWorldDirectorDressingInstance& Instance = InOutPlan.Dressing.AddDefaulted_GetRef();
+		Instance.MeshAsset = Asset->MeshAsset;
+		Instance.Transform = FTransform(FRotator(0.0f, Yaw, 0.0f), Position,
+			FVector(FMath::Clamp(1.0f, Asset->MinimumScale, Asset->MaximumScale)));
+		Instance.BiomeTag = BiomeTag;
+		return true;
+	};
+	auto AddFeature = [&](const FName PlacementTag, const FVector& Position, const float Yaw) -> bool
+	{
+		const FWorldEnvironmentDressingAsset* Asset = PickDressingAsset(Profile, PlacementTag, Random);
+		if (Asset == nullptr)
+		{
+			return false;
+		}
+		FWorldDirectorFeatureInstance& Feature = InOutPlan.Features.AddDefaulted_GetRef();
+		Feature.Asset = Asset->MeshAsset;
+		Feature.Transform = FTransform(FRotator(0.0f, Yaw, 0.0f), Position);
+		Feature.FeatureTag = PlacementTag;
+		return true;
+	};
+	auto Ground = [&](const FVector2D& Position)
+	{
+		return FVector(Position, Height(Position));
+	};
+	// Spirals out from the preferred point until it finds dry, gentle ground that keeps
+	// clear of roads, buildings and fields.
+	auto FindClearSpot = [&](const FVector2D& Preferred, const float RouteClearance,
+		const float EnvelopePadding, const float MaximumSlope, FVector2D& OutPosition) -> bool
+	{
+		for (int32 Attempt = 0; Attempt < 48; ++Attempt)
+		{
+			const float Angle = Attempt * 2.39996323f;
+			const FVector2D Candidate = Preferred + (Attempt == 0 ? FVector2D::ZeroVector
+				: FVector2D(FMath::Cos(Angle), FMath::Sin(Angle)) * (140.0f + Attempt * 60.0f));
+			if (InBounds(Candidate, 1500.0f) && IsDry(Candidate, 60.0f) &&
+				Slope(Candidate) <= MaximumSlope &&
+				DistanceToRoutes(Candidate, InOutPlan.Routes) >= RouteClearance &&
+				!IsInsideLocationEnvelope(Candidate, InOutPlan.Locations, EnvelopePadding) &&
+				!InFarm(Candidate))
+			{
+				OutPosition = Candidate;
+				return true;
+			}
+		}
+		return false;
+	};
+	auto FindLocation = [&InOutPlan](const FString& LocationId) -> const FResolvedLocationPlan*
+	{
+		return InOutPlan.Locations.FindByPredicate([&LocationId](const FResolvedLocationPlan& Location)
+		{
+			return Location.LocationId == LocationId;
+		});
+	};
+	const FResolvedLocationPlan* Landmark = FindLocation(InOutPlan.LandmarkLocationId);
+	const FResolvedLocationPlan* Authority = InOutPlan.Locations.FindByPredicate([](const FResolvedLocationPlan& Location)
+	{
+		return Location.PurposeTag == TEXT("Purpose.Headquarters");
+	});
+	if (Authority == nullptr)
+	{
+		Authority = Landmark;
+	}
+	auto LocalToWorld = [](const FResolvedLocationPlan& Location, const float X, const float Y)
+	{
+		return FVector2D(Location.Transform.TransformPositionNoScale(FVector(X, Y, 0.0f)));
+	};
+
+	// Fortification: a ring traced around the convex hull of every footprint. Roads keep
+	// open gateways; palisade and stockade gateways get a gate frame.
+	struct FGateSite
+	{
+		FVector2D Position;
+		FVector2D Tangent;
+		FVector2D Outward;
+	};
+	TArray<FGateSite> Gates;
+	const bool bWalled = Presentation.Fortification == TEXT("palisade") || Presentation.Fortification == TEXT("stockade");
+	const bool bStockade = Presentation.Fortification == TEXT("stockade");
+	if (Presentation.Fortification != TEXT("open") && InOutPlan.Locations.Num() >= 3)
+	{
+		TArray<FVector2D> Corners;
+		for (const FResolvedLocationPlan& Location : InOutPlan.Locations)
+		{
+			for (const float SignX : {-1.0f, 1.0f})
+			{
+				for (const float SignY : {-1.0f, 1.0f})
+				{
+					Corners.Add(LocalToWorld(Location, SignX * Location.FootprintSize.X * 0.5f,
+						SignY * Location.FootprintSize.Y * 0.5f));
+				}
+			}
+		}
+		TArray<FVector2D> Hull = ConvexHull(Corners);
+		FVector2D Centroid = FVector2D::ZeroVector;
+		for (const FVector2D& Vertex : Hull)
+		{
+			Centroid += Vertex / static_cast<float>(Hull.Num());
+		}
+		const float Padding = bWalled ? 1500.0f : 900.0f;
+		for (FVector2D& Vertex : Hull)
+		{
+			Vertex += (Vertex - Centroid).GetSafeNormal() * Padding;
+		}
+		const float SegmentLength = bWalled ? 600.0f : 285.0f;
+		struct FRingSegment
+		{
+			FVector2D Center;
+			FVector2D Tangent;
+			FVector2D Outward;
+			bool bRoad = false;
+			bool bBlocked = false;
+		};
+		TArray<FRingSegment> Ring;
+		for (int32 EdgeIndex = 0; EdgeIndex < Hull.Num(); ++EdgeIndex)
+		{
+			const FVector2D A = Hull[EdgeIndex];
+			const FVector2D B = Hull[(EdgeIndex + 1) % Hull.Num()];
+			const float EdgeLength = FVector2D::Distance(A, B);
+			const int32 Count = FMath::Max(1, FMath::CeilToInt(EdgeLength / SegmentLength));
+			const FVector2D Tangent = (B - A).GetSafeNormal();
+			for (int32 Segment = 0; Segment < Count; ++Segment)
+			{
+				FRingSegment& Entry = Ring.AddDefaulted_GetRef();
+				Entry.Center = FMath::Lerp(A, B, (Segment + 0.5f) / Count);
+				Entry.Tangent = Tangent;
+				Entry.Outward = (Entry.Center - Centroid).GetSafeNormal();
+				const FVector2D EndA = Entry.Center - Tangent * SegmentLength * 0.5f;
+				const FVector2D EndB = Entry.Center + Tangent * SegmentLength * 0.5f;
+				Entry.bRoad = FMath::Min3(DistanceToRoutes(Entry.Center, InOutPlan.Routes),
+					DistanceToRoutes(EndA, InOutPlan.Routes), DistanceToRoutes(EndB, InOutPlan.Routes)) < 260.0f;
+				Entry.bBlocked = !InBounds(Entry.Center, 1200.0f) || !IsDry(Entry.Center, 40.0f) ||
+					Slope(Entry.Center) > 18.0f || InFarm(Entry.Center) ||
+					IsInsideLocationEnvelope(Entry.Center, InOutPlan.Locations, 150.0f);
+			}
+		}
+		// Roads in this generator join buildings to each other, so most rings are never
+		// crossed by one. A walled town still needs ways out: open a gateway toward each
+		// of the nearest fields (or toward and away from the landmark) when no road does.
+		if (!Ring.ContainsByPredicate([](const FRingSegment& Entry) { return Entry.bRoad; }) && Ring.Num() >= 8)
+		{
+			TArray<FVector2D> Directions;
+			TArray<const FWorldDirectorFarmParcel*> Parcels;
+			for (const FWorldDirectorFarmParcel& Parcel : Terrain.FarmParcels)
+			{
+				Parcels.Add(&Parcel);
+			}
+			Parcels.Sort([&Centroid](const FWorldDirectorFarmParcel& A, const FWorldDirectorFarmParcel& B)
+			{
+				return FVector2D::DistSquared(A.Center, Centroid) < FVector2D::DistSquared(B.Center, Centroid);
+			});
+			for (const FWorldDirectorFarmParcel* Parcel : Parcels)
+			{
+				const FVector2D Direction = (Parcel->Center - Centroid).GetSafeNormal();
+				if (Directions.Num() < 2 && !Directions.ContainsByPredicate([&Direction](const FVector2D& Existing)
+					{ return FVector2D::DotProduct(Existing, Direction) > 0.0f; }))
+				{
+					Directions.Add(Direction);
+				}
+			}
+			if (Directions.Num() < 2 && Landmark != nullptr)
+			{
+				const FVector2D Toward = (FVector2D(Landmark->EntranceTransform.GetLocation()) - Centroid).GetSafeNormal();
+				for (const FVector2D& Candidate : {Toward, -Toward})
+				{
+					if (Directions.Num() < 2 && !Candidate.IsNearlyZero() &&
+						!Directions.ContainsByPredicate([&Candidate](const FVector2D& Existing)
+							{ return FVector2D::DotProduct(Existing, Candidate) > 0.0f; }))
+					{
+						Directions.Add(Candidate);
+					}
+				}
+			}
+			for (const FVector2D& Direction : Directions)
+			{
+				int32 Best = INDEX_NONE;
+				float BestAlignment = -2.0f;
+				for (int32 Index = 0; Index < Ring.Num(); ++Index)
+				{
+					const float Alignment = FVector2D::DotProduct(Ring[Index].Outward, Direction);
+					if (!Ring[Index].bBlocked && Alignment > BestAlignment)
+					{
+						BestAlignment = Alignment;
+						Best = Index;
+					}
+				}
+				for (int32 Offset = -1; Best != INDEX_NONE && Offset <= 1; ++Offset)
+				{
+					Ring[(Best + Offset + Ring.Num()) % Ring.Num()].bRoad = true;
+				}
+			}
+		}
+		for (int32 Index = 0; Index < Ring.Num(); ++Index)
+		{
+			const FRingSegment& Entry = Ring[Index];
+			if (Entry.bRoad || Entry.bBlocked)
+			{
+				continue;
+			}
+			const float TangentYaw = FMath::RadiansToDegrees(FMath::Atan2(Entry.Tangent.Y, Entry.Tangent.X));
+			const FVector2D EndA = Entry.Center - Entry.Tangent * SegmentLength * 0.5f;
+			const FVector2D EndB = Entry.Center + Entry.Tangent * SegmentLength * 0.5f;
+			// Sink to the lower end so slopes never leave a wall hanging in the air.
+			const float BaseHeight = FMath::Min3(Height(Entry.Center), Height(EndA), Height(EndB)) - 25.0f;
+			if (bWalled)
+			{
+				Placed.WallSegments += AddMesh(TEXT("Dressing.PalisadeWall"), FVector(Entry.Center, BaseHeight),
+					TangentYaw - 90.0f, TEXT("Biome.FortificationSolid"));
+				if (bStockade && Index % 4 == 2)
+				{
+					const FVector2D Spikes = Entry.Center + Entry.Outward * 430.0f;
+					if (IsDry(Spikes, 40.0f) && DistanceToRoutes(Spikes, InOutPlan.Routes) > 260.0f && !InFarm(Spikes))
+					{
+						Placed.Barricades += AddMesh(TEXT("Dressing.Barricade"), Ground(Spikes), TangentYaw,
+							TEXT("Biome.FortificationBarricade"));
+					}
+				}
+			}
+			else
+			{
+				Placed.FenceSegments += AddMesh(TEXT("Dressing.FarmFence"), FVector(Entry.Center, BaseHeight + 15.0f),
+					TangentYaw, TEXT("Biome.FenceRing"));
+			}
+		}
+		// One gate frame in the middle of every run of road-crossing segments.
+		for (int32 Index = 0; Index < Ring.Num() && bWalled; ++Index)
+		{
+			if (!Ring[Index].bRoad || Ring[(Index + Ring.Num() - 1) % Ring.Num()].bRoad)
+			{
+				continue;
+			}
+			int32 RunLength = 0;
+			while (RunLength < Ring.Num() && Ring[(Index + RunLength) % Ring.Num()].bRoad)
+			{
+				++RunLength;
+			}
+			const FRingSegment& Middle = Ring[(Index + RunLength / 2) % Ring.Num()];
+			if (!InBounds(Middle.Center, 1200.0f) || !IsDry(Middle.Center, 40.0f))
+			{
+				continue;
+			}
+			const float TangentYaw = FMath::RadiansToDegrees(FMath::Atan2(Middle.Tangent.Y, Middle.Tangent.X));
+			if (AddMesh(TEXT("Dressing.PalisadeGate"), FVector(Middle.Center, Height(Middle.Center) - 20.0f),
+				TangentYaw - 90.0f, TEXT("Biome.FortificationGate")))
+			{
+				++Placed.Gates;
+				Gates.Add({Middle.Center, Middle.Tangent, Middle.Outward});
+			}
+		}
+		if (bStockade)
+		{
+			for (const FGateSite& Gate : Gates)
+			{
+				const float TangentYaw = FMath::RadiansToDegrees(FMath::Atan2(Gate.Tangent.Y, Gate.Tangent.X));
+				for (const float Side : {-1.0f, 1.0f})
+				{
+					const FVector2D Banner = Gate.Position + Gate.Tangent * Side * 420.0f + Gate.Outward * 140.0f;
+					if (IsDry(Banner, 40.0f) && DistanceToRoutes(Banner, InOutPlan.Routes) > 60.0f)
+					{
+						Placed.Banners += AddMesh(TEXT("Dressing.GuildBanner"), Ground(Banner), TangentYaw,
+							TEXT("Biome.FortificationBanner"));
+					}
+				}
+				FVector2D Tower;
+				if (FindClearSpot(Gate.Position + Gate.Tangent * 760.0f - Gate.Outward * 320.0f, 330.0f, 250.0f, 12.0f, Tower) ||
+					FindClearSpot(Gate.Position - Gate.Tangent * 760.0f - Gate.Outward * 320.0f, 330.0f, 250.0f, 12.0f, Tower))
+				{
+					Placed.Towers += AddMesh(TEXT("Dressing.Watchtower"), Ground(Tower) - FVector(0.0f, 0.0f, 20.0f),
+						TangentYaw, TEXT("Biome.FortificationSolid"));
+				}
+			}
+			// Corner towers on the sharpest hull turns until the town has four.
+			TArray<int32> Corners2;
+			for (int32 Index = 0; Index < Hull.Num(); ++Index)
+			{
+				Corners2.Add(Index);
+			}
+			Corners2.Sort([&Hull](const int32 A, const int32 B)
+			{
+				auto Turn = [&Hull](const int32 I)
+				{
+					const FVector2D In = (Hull[I] - Hull[(I + Hull.Num() - 1) % Hull.Num()]).GetSafeNormal();
+					const FVector2D Out = (Hull[(I + 1) % Hull.Num()] - Hull[I]).GetSafeNormal();
+					return FVector2D::DotProduct(In, Out);
+				};
+				return Turn(A) < Turn(B);
+			});
+			for (const int32 CornerIndex : Corners2)
+			{
+				if (Placed.Towers >= 4)
+				{
+					break;
+				}
+				const FVector2D Inward = (Centroid - Hull[CornerIndex]).GetSafeNormal();
+				FVector2D Tower;
+				if (FindClearSpot(Hull[CornerIndex] + Inward * 300.0f, 330.0f, 250.0f, 12.0f, Tower))
+				{
+					Placed.Towers += AddMesh(TEXT("Dressing.Watchtower"), Ground(Tower) - FVector(0.0f, 0.0f, 20.0f),
+						FMath::RadiansToDegrees(FMath::Atan2(Inward.Y, Inward.X)), TEXT("Biome.FortificationSolid"));
+				}
+			}
+		}
+	}
+
+	// Water life: piers from the nearest shores, boats beside them, bridges where roads
+	// already cross water.
+	FString WaterLifeReason;
+	if (Presentation.WaterLife != TEXT("none"))
+	{
+		if (Terrain.WaterLevelCentimeters == INDEX_NONE)
+		{
+			WaterLifeReason = TEXT("This landform has no water; choose coast, valley or marsh.");
+		}
+		else
+		{
+			const bool bHarbor = Presentation.WaterLife == TEXT("harbor");
+			const float WaterLevel = static_cast<float>(Terrain.WaterLevelCentimeters);
+			struct FShore
+			{
+				FVector2D Land;
+				FVector2D IntoWater;
+				float Distance = 0.0f;
+			};
+			TArray<FShore> Shores;
+			for (const FVector& Control : Terrain.WaterControlPoints)
+			{
+				const FVector2D Water(Control);
+				const FVector2D ToCore = (CivicCore - Water).GetSafeNormal();
+				if (!InBounds(Water, 2500.0f) || ToCore.IsNearlyZero() || Height(Water) > WaterLevel - 20.0f)
+				{
+					continue;
+				}
+				for (float Step = 150.0f; Step <= 40000.0f; Step += 150.0f)
+				{
+					const FVector2D Probe = Water + ToCore * Step;
+					if (!InBounds(Probe, 1500.0f))
+					{
+						break;
+					}
+					if (Height(Probe) > WaterLevel + 40.0f)
+					{
+						Shores.Add({Probe, -ToCore, FVector2D::Distance(Probe, CivicCore)});
+						break;
+					}
+				}
+			}
+			Shores.Sort([](const FShore& A, const FShore& B) { return A.Distance < B.Distance; });
+			const int32 PierTarget = bHarbor ? 4 : 2;
+			const int32 SegmentsPerPier = bHarbor ? 3 : 2;
+			TArray<FVector2D> UsedShores;
+			for (const FShore& Shore : Shores)
+			{
+				if (Placed.Piers >= PierTarget || Shore.Distance > SettlementRadius + 12000.0f)
+				{
+					break;
+				}
+				if (UsedShores.ContainsByPredicate([&Shore](const FVector2D& Used)
+					{ return FVector2D::Distance(Used, Shore.Land) < 2200.0f; }) ||
+					IsInsideLocationEnvelope(Shore.Land, InOutPlan.Locations, 200.0f))
+				{
+					continue;
+				}
+				const FVector2D Side(-Shore.IntoWater.Y, Shore.IntoWater.X);
+				const float PierYaw = FMath::RadiansToDegrees(FMath::Atan2(Shore.IntoWater.Y, Shore.IntoWater.X)) - 90.0f;
+				FVector2D PierEnd = Shore.Land;
+				int32 Segments = 0;
+				for (int32 Segment = 0; Segment < SegmentsPerPier; ++Segment)
+				{
+					const FVector2D Center = Shore.Land + Shore.IntoWater * (579.0f * (Segment + 0.5f) - 140.0f);
+					if (!InBounds(Center, 1200.0f))
+					{
+						break;
+					}
+					const float Deck = FMath::Max(WaterLevel + 55.0f, Height(Center) + 20.0f);
+					Segments += AddMesh(TEXT("Dressing.Pier"), FVector(Center, Deck), PierYaw, TEXT("Biome.Waterfront"));
+					PierEnd = Center;
+				}
+				if (Segments == 0)
+				{
+					continue;
+				}
+				++Placed.Piers;
+				UsedShores.Add(Shore.Land);
+				for (const float BoatSide : {1.0f, -1.0f})
+				{
+					if (BoatSide < 0.0f && !bHarbor)
+					{
+						break;
+					}
+					const FVector2D Boat = PierEnd + Side * BoatSide * 280.0f;
+					if (Height(Boat) < WaterLevel - 10.0f)
+					{
+						Placed.Boats += AddMesh(TEXT("Dressing.Boat"), FVector(Boat, WaterLevel - 35.0f),
+							PierYaw + Random.FRandRange(-9.0f, 9.0f), TEXT("Biome.Waterfront"));
+					}
+				}
+				for (int32 Crate = 0; bHarbor && Crate < 3; ++Crate)
+				{
+					FVector2D Position;
+					if (FindClearSpot(Shore.Land - Shore.IntoWater * 260.0f + Side * (Crate - 1) * 200.0f,
+						120.0f, 60.0f, 14.0f, Position))
+					{
+						Placed.Dockside += AddMesh(TEXT("Dressing.Dockside"), Ground(Position),
+							Random.FRandRange(0.0f, 360.0f), TEXT("Biome.Waterfront"));
+					}
+				}
+			}
+			// Bridges: tile wooden spans over every wet stretch of every road.
+			for (const FResolvedRoutePlan& Route : InOutPlan.Routes)
+			{
+				for (int32 Index = 1; Index < Route.ControlPoints.Num() && Placed.BridgePieces < 40; ++Index)
+				{
+					const FVector2D A(Route.ControlPoints[Index - 1]);
+					const FVector2D B(Route.ControlPoints[Index]);
+					const float Length = FVector2D::Distance(A, B);
+					const FVector2D Direction = (B - A).GetSafeNormal();
+					const float Yaw = FMath::RadiansToDegrees(FMath::Atan2(Direction.Y, Direction.X)) - 90.0f;
+					for (float Along = 220.0f; Along < Length; Along += 430.0f)
+					{
+						const FVector2D Position = A + Direction * Along;
+						if (Height(Position) <= WaterLevel + 20.0f)
+						{
+							Placed.BridgePieces += AddMesh(TEXT("Dressing.Bridge"),
+								FVector(Position, WaterLevel + 10.0f), Yaw, TEXT("Biome.Waterfront"));
+						}
+					}
+				}
+			}
+			if (Placed.Piers == 0 && Placed.BridgePieces == 0)
+			{
+				WaterLifeReason = TEXT("No shoreline within reach of the town.");
+			}
+		}
+	}
+
+	// Justice: a gallows beside the seat of authority; grim towns add a guillotine and
+	// coffins by the landmark square.
+	if (Presentation.Justice != TEXT("lenient") && Authority != nullptr)
+	{
+		FVector2D Gallows;
+		const bool bGallowsSpot =
+			FindClearSpot(LocalToWorld(*Authority, Authority->FootprintSize.X * 0.5f + 650.0f, Authority->FootprintSize.Y * 0.15f),
+				220.0f, 220.0f, 12.0f, Gallows) ||
+			FindClearSpot(LocalToWorld(*Authority, -(Authority->FootprintSize.X * 0.5f + 650.0f), Authority->FootprintSize.Y * 0.15f),
+				220.0f, 220.0f, 12.0f, Gallows) ||
+			(Landmark != nullptr && FindClearSpot(LocalToWorld(*Landmark, Landmark->FootprintSize.X * 0.5f + 650.0f, 0.0f),
+				220.0f, 220.0f, 12.0f, Gallows));
+		if (bGallowsSpot)
+		{
+			Placed.Gallows += AddMesh(TEXT("Dressing.Gallows"), Ground(Gallows), Authority->Transform.Rotator().Yaw,
+				TEXT("Biome.Justice"));
+			for (int32 Coffin = 0; Presentation.Justice == TEXT("grim") && Coffin < 3; ++Coffin)
+			{
+				FVector2D Position;
+				if (FindClearSpot(Gallows + FVector2D(-260.0f + Coffin * 200.0f, 380.0f), 140.0f, 100.0f, 12.0f, Position))
+				{
+					Placed.Coffins += AddMesh(TEXT("Dressing.Coffin"), Ground(Position),
+						Authority->Transform.Rotator().Yaw + Random.FRandRange(-12.0f, 12.0f), TEXT("Biome.Justice"));
+				}
+			}
+		}
+		if (Presentation.Justice == TEXT("grim") && Landmark != nullptr)
+		{
+			FVector2D Guillotine;
+			if (FindClearSpot(LocalToWorld(*Landmark, -(Landmark->FootprintSize.X * 0.5f + 700.0f), -Landmark->FootprintSize.Y * 0.3f),
+				280.0f, 320.0f, 9.0f, Guillotine))
+			{
+				Placed.Guillotines += AddMesh(TEXT("Dressing.Guillotine"), Ground(Guillotine),
+					Landmark->Transform.Rotator().Yaw, TEXT("Biome.Justice"));
+			}
+		}
+	}
+
+	// Fire: braziers flank the important doors; a vigil also lines the main streets and
+	// lights watchfires; smouldering puts smoke over the buildings the threat touches.
+	FString FireReason;
+	if (Presentation.Fire == TEXT("braziers") || Presentation.Fire == TEXT("vigil"))
+	{
+		TArray<const FResolvedLocationPlan*> Doors;
+		Doors.Add(Landmark);
+		if (Authority != Landmark)
+		{
+			Doors.Add(Authority);
+		}
+		for (const FResolvedLocationPlan* Location : Doors)
+		{
+			if (Location == nullptr)
+			{
+				continue;
+			}
+			const FVector2D Entrance(Location->EntranceTransform.GetLocation());
+			const FVector2D Facing = (Entrance - FVector2D(Location->Transform.GetLocation())).GetSafeNormal();
+			const FVector2D Side(-Facing.Y, Facing.X);
+			for (const float SideSign : {-1.0f, 1.0f})
+			{
+				const FVector2D Position = Entrance + Facing * 160.0f + Side * SideSign * 270.0f;
+				if (IsDry(Position, 40.0f) && Slope(Position) <= 14.0f)
+				{
+					Placed.Braziers += AddFeature(TEXT("Feature.Brazier"), Ground(Position), 0.0f);
+				}
+			}
+		}
+		for (const FGateSite& Gate : Gates)
+		{
+			for (const float SideSign : {-1.0f, 1.0f})
+			{
+				const FVector2D Position = Gate.Position + Gate.Tangent * SideSign * 400.0f - Gate.Outward * 220.0f;
+				if (IsDry(Position, 40.0f) && DistanceToRoutes(Position, InOutPlan.Routes) > 40.0f)
+				{
+					Placed.Braziers += AddFeature(TEXT("Feature.Brazier"), Ground(Position), 0.0f);
+				}
+			}
+		}
+		if (Presentation.Fire == TEXT("vigil"))
+		{
+			int32 StreetBraziers = 0;
+			for (const FResolvedRoutePlan& Route : InOutPlan.Routes)
+			{
+				float Carry = 0.0f;
+				for (int32 Index = 1; Index < Route.ControlPoints.Num() && StreetBraziers < 12; ++Index)
+				{
+					const FVector2D A(Route.ControlPoints[Index - 1]);
+					const FVector2D B(Route.ControlPoints[Index]);
+					const float Length = FVector2D::Distance(A, B);
+					const FVector2D Direction = (B - A).GetSafeNormal();
+					const FVector2D Side(-Direction.Y, Direction.X);
+					for (float Along = 2400.0f - Carry; Along < Length; Along += 2400.0f)
+					{
+						const FVector2D Position = A + Direction * Along +
+							Side * (StreetBraziers % 2 == 0 ? 1.0f : -1.0f) * (Route.WidthCentimeters * 0.5f + 190.0f);
+						if (FVector2D::Distance(Position, CivicCore) < SettlementRadius * 0.8f && IsDry(Position, 40.0f) &&
+							Slope(Position) <= 14.0f && !IsInsideLocationEnvelope(Position, InOutPlan.Locations, 40.0f))
+						{
+							StreetBraziers += AddFeature(TEXT("Feature.Brazier"), Ground(Position), 0.0f);
+						}
+					}
+					Carry = FMath::Fmod(Carry + Length, 2400.0f);
+				}
+			}
+			Placed.Braziers += StreetBraziers;
+			for (const float SideSign : {-1.0f, 1.0f})
+			{
+				FVector2D Position;
+				if (Landmark != nullptr && FindClearSpot(LocalToWorld(*Landmark,
+					SideSign * (Landmark->FootprintSize.X * 0.5f + 520.0f), -(Landmark->FootprintSize.Y * 0.5f + 520.0f)),
+					180.0f, 160.0f, 10.0f, Position))
+				{
+					Placed.Watchfires += AddFeature(TEXT("Feature.Watchfire"), Ground(Position), 0.0f);
+				}
+			}
+		}
+	}
+	else if (Presentation.Fire == TEXT("smouldering"))
+	{
+		TArray<FString> Affected;
+		for (const FThreat& Threat : Spec.Threats)
+		{
+			for (const FString& LocationId : Threat.AffectedLocationIds)
+			{
+				if (Affected.Num() < 3 && FindLocation(LocationId) != nullptr)
+				{
+					Affected.AddUnique(LocationId);
+				}
+			}
+		}
+		for (const FString& LocationId : Affected)
+		{
+			const FResolvedLocationPlan* Location = FindLocation(LocationId);
+			const FVector Roof = Location->Transform.GetLocation() + FVector(0.0f, 0.0f, 650.0f);
+			Placed.SmokeColumns += AddFeature(TEXT("Feature.Smoke"), Roof, 0.0f);
+			for (const float SideSign : {-1.0f, 1.0f})
+			{
+				FVector2D Position;
+				if (FindClearSpot(LocalToWorld(*Location, SideSign * (Location->FootprintSize.X * 0.5f + 260.0f), 0.0f),
+					120.0f, 80.0f, 12.0f, Position))
+				{
+					Placed.BurntPiles += AddMesh(TEXT("Dressing.BurntPile"), Ground(Position),
+						Random.FRandRange(0.0f, 360.0f), TEXT("Biome.Smouldering"));
+				}
+			}
+		}
+		if (Affected.IsEmpty())
+		{
+			FireReason = TEXT("No threat names an affected location to smoulder.");
+		}
+	}
+
+	// Record what each choice produced.
+	auto Record = [&](const TCHAR* Field, const FString& Value, const FString& Effect, const FString& Unavailable)
+	{
+		const bool bDefault = Value.Equals(FWorldDirectorPresentation::Fields().FindByPredicate(
+			[Field](const FWorldDirectorPresentation::FField& Candidate)
+			{
+				return FCString::Strcmp(Candidate.Name, Field) == 0;
+			})->Options[0].Value);
+		FWorldDirectorExpressionEntry& Entry = InOutPlan.Expression.AddDefaulted_GetRef();
+		Entry.Field = FString::Printf(TEXT("brief.presentation.%s"), Field);
+		Entry.Value = Value;
+		if (!Unavailable.IsEmpty())
+		{
+			Entry.Outcome = TEXT("NotApplicable");
+			Entry.Detail = Unavailable;
+		}
+		else
+		{
+			Entry.Outcome = TEXT("Applied");
+			Entry.Detail = bDefault ? TEXT("Default; adds nothing.") : Effect;
+			if (!bDefault && Effect.IsEmpty())
+			{
+				Entry.Outcome = TEXT("NotApplicable");
+				Entry.Detail = TEXT("Nothing could be placed on this layout.");
+			}
+		}
+		if (OverriddenFields.Contains(Field))
+		{
+			Entry.Detail += TEXT(" (set by -WorldDirectorPresentationOverride)");
+		}
+	};
+	Record(TEXT("fortification"), Presentation.Fortification, DescribeCounts({
+		{TEXT("wall segments"), Placed.WallSegments}, {TEXT("fence segments"), Placed.FenceSegments},
+		{TEXT("gates"), Placed.Gates}, {TEXT("watchtowers"), Placed.Towers},
+		{TEXT("spiked barricades"), Placed.Barricades}, {TEXT("gate banners"), Placed.Banners}}), FString());
+	Record(TEXT("waterLife"), Presentation.WaterLife, DescribeCounts({
+		{TEXT("piers"), Placed.Piers}, {TEXT("boats"), Placed.Boats},
+		{TEXT("bridge spans"), Placed.BridgePieces}, {TEXT("dockside crates"), Placed.Dockside}}), WaterLifeReason);
+	Record(TEXT("justice"), Presentation.Justice, DescribeCounts({
+		{TEXT("gallows"), Placed.Gallows}, {TEXT("guillotines"), Placed.Guillotines},
+		{TEXT("coffins"), Placed.Coffins}}), FString());
+	Record(TEXT("fire"), Presentation.Fire, DescribeCounts({
+		{TEXT("lit braziers"), Placed.Braziers}, {TEXT("watchfires"), Placed.Watchfires},
+		{TEXT("smoke columns"), Placed.SmokeColumns}, {TEXT("burnt wood piles"), Placed.BurntPiles}}), FireReason);
+	Record(TEXT("timeOfDay"), Presentation.TimeOfDay, FString::Printf(TEXT("Clock starts at %02d:%02d."),
+		FWorldDirectorPresentation::StartMinute(Presentation.TimeOfDay) / 60,
+		FWorldDirectorPresentation::StartMinute(Presentation.TimeOfDay) % 60), FString());
+	Record(TEXT("weather"), Presentation.Weather, TEXT("Fog, light, colour grading and wind set at runtime."), FString());
+	Record(TEXT("season"), Presentation.Season, TEXT("Tree and grass tint set at runtime."), FString());
+	Record(TEXT("roofPalette"), Presentation.RoofPalette, TEXT("Roof tint set at runtime."), FString());
+	Record(TEXT("authorityColor"), Presentation.AuthorityColor,
+		TEXT("Landmark and seat-of-authority roof tint set at runtime."), FString());
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_PRESENTATION fortification=%s waterLife=%s justice=%s fire=%s timeOfDay=%s weather=%s season=%s roofPalette=%s authorityColor=%s walls=%d fences=%d gates=%d towers=%d barricades=%d banners=%d piers=%d boats=%d bridges=%d gallows=%d guillotines=%d coffins=%d braziers=%d watchfires=%d smoke=%d"),
+		*Presentation.Fortification, *Presentation.WaterLife, *Presentation.Justice, *Presentation.Fire,
+		*Presentation.TimeOfDay, *Presentation.Weather, *Presentation.Season, *Presentation.RoofPalette,
+		*Presentation.AuthorityColor, Placed.WallSegments, Placed.FenceSegments, Placed.Gates, Placed.Towers,
+		Placed.Barricades, Placed.Banners, Placed.Piers, Placed.Boats, Placed.BridgePieces, Placed.Gallows,
+		Placed.Guillotines, Placed.Coffins, Placed.Braziers, Placed.Watchfires, Placed.SmokeColumns);
+}
+
 bool FWorldDirectorPhysicalGenerator::Generate(
 	const FGeneratedWorldSpec& Spec,
 	FResolvedWorldPlan& InOutPlan,
@@ -1363,6 +2330,10 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 	InOutPlan.DistrictAnchors.Reset();
 	InOutPlan.Routes.Reset();
 	InOutPlan.Dressing.Reset();
+	InOutPlan.Features.Reset();
+	TArray<FString> OverriddenPresentationFields;
+	InOutPlan.Presentation = FWorldDirectorPresentation::ResolveEffective(
+		Spec.Brief.Presentation, &OverriddenPresentationFields);
 	InOutPlan.LayoutFingerprint.Reset();
 	InOutPlan.RouteFingerprint.Reset();
 	InOutPlan.DressingFingerprint.Reset();
@@ -1384,6 +2355,15 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 	Terrain.Resolution = TerrainResolution;
 	Terrain.ExtentCentimeters = TerrainExtent;
 	Terrain.Archetype = ResolveArchetype(Spec.Brief, Spec.Seed);
+	{
+		FWorldDirectorExpressionEntry& Entry = InOutPlan.Expression.AddDefaulted_GetRef();
+		Entry.Field = TEXT("brief.landform");
+		Entry.Value = Spec.Brief.Landform;
+		const bool bFromLandform = TryParseLandform(Spec.Brief.Landform, nullptr);
+		Entry.Outcome = bFromLandform ? TEXT("Applied") : TEXT("Defaulted");
+		Entry.Detail = bFromLandform ? TEXT("Terrain built from the landform.")
+			: TEXT("No landform; terrain guessed from terrainPreferences keywords.");
+	}
 	Terrain.SettlementMorphology = ResolveSettlementMorphology(Terrain.Archetype, Spec.Seed);
 	Terrain.HeightsCentimeters.Reserve(TerrainResolution * TerrainResolution);
 	Terrain.SurfaceTypes.Reserve(TerrainResolution * TerrainResolution);
@@ -2566,6 +3546,7 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 	int32 FarmTransportCount = 0;
 	int32 HomeUtilityCount = 0;
 	int32 InnYardCount = 0;
+	int32 WorkYardCount = 0;
 	int32 CommunalFireCount = 0;
 	auto AddIdentityDressing = [&](const FName PlacementTag, const FVector2D& Position,
 		const float FacingYaw, const FName BiomeTag, const float MaximumSlope,
@@ -3020,6 +4001,27 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 					TEXT("Biome.InnYard"), 10.0f, 80.0f);
 			}
 		}
+		else if (!bHome)
+		{
+			const FName SemanticPurpose = SemanticLocation != nullptr
+				? SemanticLocation->PurposeTag : Location.PurposeTag;
+			const TArray<FName> YardTags = ResolveWorkYardTags(SemanticIdentity, SemanticPurpose);
+			for (int32 YardIndex = 0; YardIndex < YardTags.Num(); ++YardIndex)
+			{
+				const float SideSign = ((IdentitySeed >> YardIndex) & 1U) == 0U ? -1.0f : 1.0f;
+				const FVector YardWorld = Location.Transform.TransformPositionNoScale(FVector(
+					SideSign * (Location.FootprintSize.X * 0.5f + 300.0f + YardIndex * 150.0f),
+					Location.FootprintSize.Y * (0.30f - YardIndex * 0.24f), 0.0f));
+				const FVector2D YardPosition(YardWorld);
+				if (DistanceToRoutes(YardPosition, InOutPlan.Routes) > 160.0f)
+				{
+					WorkYardCount += AddIdentityDressing(
+						YardTags[YardIndex], YardPosition,
+						Location.Transform.Rotator().Yaw + SideSign * 90.0f,
+						TEXT("Biome.WorkYard"), 12.0f, 80.0f);
+				}
+			}
+		}
 	}
 
 	// Place a small authored-feeling motif after the broad biome pass. These
@@ -3216,11 +4218,12 @@ bool FWorldDirectorPhysicalGenerator::Generate(
 			WayfindingCount += PlacementTag == TEXT("Dressing.Wayfinding");
 		}
 	}
+	PlacePresentationFeatures(Spec, Profile, CivicCore, SettlementRadius, OverriddenPresentationFields, InOutPlan);
 	UE_LOG(LogWorldDirector, Display,
-		TEXT("WORLD_DIRECTOR_DRESSING_COMPOSITION settlementGroves=%d roadsideLamps=%d wayfinding=%d civicAnchors=%d civicSeats=%d districtSeats=%d guildBanners=%d farmTransport=%d homeUtility=%d innYard=%d communalFire=%d"),
+		TEXT("WORLD_DIRECTOR_DRESSING_COMPOSITION settlementGroves=%d roadsideLamps=%d wayfinding=%d civicAnchors=%d civicSeats=%d districtSeats=%d guildBanners=%d farmTransport=%d homeUtility=%d innYard=%d communalFire=%d workYard=%d"),
 		SettlementGroveCount, LampCount, WayfindingCount, CivicAnchorCount,
 		CivicSeatCount, DistrictGatheringSeatCount, GuildBannerCount, FarmTransportCount, HomeUtilityCount,
-		InnYardCount, CommunalFireCount);
+		InnYardCount, CommunalFireCount, WorkYardCount);
 
 	TArray<uint8> LayoutBytes;
 	for (const FResolvedLocationPlan& Location : InOutPlan.Locations)

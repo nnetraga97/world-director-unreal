@@ -9,6 +9,8 @@
     "settlementIdentity": "Brackenford compiler fixture",
     "playerPrompt": "Compile the certified Brackenford capability fixture.",
     "premises": ["Eight residents share a frontier trade settlement."],
+    "landform": "basin",
+    "presentation": {"fortification": "open", "waterLife": "none", "justice": "lenient", "fire": "hearths", "timeOfDay": "dawn", "weather": "clear", "season": "summer", "roofPalette": "natural", "authorityColor": "natural"},
     "terrainPreferences": ["Flat buildable basin", "Connected perimeter roads"],
     "requiredCapabilityTags": ["Capability.Interior", "Capability.Character.Modular"]
   },

@@ -355,6 +355,29 @@ bool FWorldDirectorJson::LoadGeneratedWorldSpec(
 	{
 		return false;
 	}
+	// Specs saved before brief.landform existed are still replayable; strict
+	// import would otherwise reject them for the missing field.
+	const TSharedPtr<FJsonObject>* BriefObject = nullptr;
+	if (RootObject->TryGetObjectField(TEXT("brief"), BriefObject) && BriefObject != nullptr &&
+		BriefObject->IsValid() && !(*BriefObject)->HasField(TEXT("landform")))
+	{
+		(*BriefObject)->SetStringField(TEXT("landform"), FString());
+		OutParseReport.AddWarning(
+			TEXT("json.legacy_brief_landform"), TEXT("$.brief.landform"),
+			TEXT("Legacy brief has no landform; terrain falls back to terrainPreferences."));
+	}
+	// Briefs saved before brief.presentation existed get the defaults, which build
+	// exactly what those worlds looked like.
+	if (BriefObject != nullptr && BriefObject->IsValid() && !(*BriefObject)->HasField(TEXT("presentation")))
+	{
+		const FWorldPresentation DefaultPresentation;
+		const TSharedRef<FJsonObject> Defaults = MakeShared<FJsonObject>();
+		FJsonObjectConverter::UStructToJsonObject(FWorldPresentation::StaticStruct(), &DefaultPresentation, Defaults, 0, 0);
+		(*BriefObject)->SetObjectField(TEXT("presentation"), Defaults);
+		OutParseReport.AddWarning(
+			TEXT("json.legacy_brief_presentation"), TEXT("$.brief.presentation"),
+			TEXT("Legacy brief has no presentation; the defaults reproduce its original look."));
+	}
 	FText FailureReason;
 	if (!FJsonObjectConverter::JsonObjectToUStruct(
 			RootObject.ToSharedRef(),

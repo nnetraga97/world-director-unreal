@@ -11,6 +11,7 @@
 #include "WorldDirectorJson.h"
 #include "WorldDirectorCompiler.h"
 #include "WorldDirectorPhysicalGenerator.h"
+#include "WorldDirectorPresentation.h"
 #include "WorldDirectorTownActors.h"
 #include "WorldDirectorValidation.h"
 #include "WorldEnvironmentProfile.h"
@@ -554,27 +555,32 @@ bool FWorldDirectorLivingTownFixtureTest::RunTest(const FString& Parameters)
 		const FString Interior = Location.InteriorAsset.ToString();
 		if (Shell.Contains(TEXT("Home_Compact_01")) ||
 			Shell.Contains(TEXT("Home_Tall_01")) ||
-			Shell.Contains(TEXT("Workplace_Inn_01")))
+			Shell.Contains(TEXT("Workplace_Inn_01")) ||
+			Shell.Contains(TEXT("Workplace_Watermill_01")))
 		{
 			TestTrue(*FString::Printf(TEXT("%s keeps its certified small interior pairing"),
 				*Location.LocationId), Interior.Contains(TEXT("Interior_Home_Small_01")));
 		}
 		else if (Shell.Contains(TEXT("Home_Compact_02")) ||
 			Shell.Contains(TEXT("Home_Multiwing_01")) ||
-			Shell.Contains(TEXT("Home_Tall_02")))
+			Shell.Contains(TEXT("Home_Tall_02")) ||
+			Shell.Contains(TEXT("Workplace_Windmill_01")))
 		{
 			TestTrue(*FString::Printf(TEXT("%s keeps its certified roomy interior pairing"),
 				*Location.LocationId), Interior.Contains(TEXT("Interior_Home_Compact_01")));
 		}
 		else if (Shell.Contains(TEXT("Workplace_Longhouse_01")) ||
-			Shell.Contains(TEXT("Workplace_Guildhall_01")))
+			Shell.Contains(TEXT("Workplace_Guildhall_01")) ||
+			Shell.Contains(TEXT("Workplace_CivicHall_0")))
 		{
 			TestTrue(*FString::Printf(TEXT("%s keeps its certified workplace interior pairing"),
 				*Location.LocationId), Interior.Contains(TEXT("Interior_Workplace_Longhouse_01")));
 		}
 	}
-	TestEqual(TEXT("Full town uses all eight purpose-compatible shell archetypes"),
-		ShellSubstyles.Num(), 8);
+	// Purpose-matched shells (watermill, windmill, civic halls) extend the original
+	// eight; a full 18-location town must use more silhouettes, not fewer.
+	TestTrue(TEXT("Full town uses at least the eight original purpose-compatible shell archetypes"),
+		ShellSubstyles.Num() >= 8);
 	TestTrue(TEXT("No shell occupies more than one third of the 18-location town"),
 		MostRepeatedShellCount <= 6);
 	for (int32 Index = 0; Index < 6; ++Index)
@@ -615,7 +621,15 @@ bool FWorldDirectorLivingTownFixtureTest::RunTest(const FString& Parameters)
 			const FString Shell = Location.ShellAsset.ToString();
 			TestTrue(*FString::Printf(TEXT("%s uses a certified public shell"), *Location.LocationId),
 				Shell.Contains(TEXT("Workplace_Longhouse_01")) ||
-				Shell.Contains(TEXT("Workplace_Inn_01")));
+				Shell.Contains(TEXT("Workplace_Inn_01")) ||
+				Shell.Contains(TEXT("Workplace_Watermill_01")) ||
+				Shell.Contains(TEXT("Workplace_Windmill_01")) ||
+				Shell.Contains(TEXT("Workplace_CivicHall_0")));
+			if (SourceLocation->Id.Contains(TEXT("mill")) && SourceLocation->PurposeTag == TEXT("Purpose.Workplace"))
+			{
+				TestTrue(*FString::Printf(TEXT("%s gets the waterwheel mill silhouette"), *Location.LocationId),
+					Shell.Contains(TEXT("Workplace_Watermill_01")));
+			}
 		}
 	}
 	FResolvedWorldPlan RepeatedPlan;
@@ -1537,6 +1551,8 @@ bool FWorldDirectorAllArchetypesPhysicalCoverageTest::RunTest(const FString& Par
 	{
 		FGeneratedWorldSpec Spec = BaseSpec;
 		Spec.Seed = 82000 + CaseIndex;
+		// Exercise the legacy prose path; brief.landform takes precedence when set.
+		Spec.Brief.Landform.Reset();
 		Spec.Brief.TerrainPreferences = {Cases[CaseIndex].Intent};
 		FResolvedWorldPlan Plan;
 		FValidationReport Report;
@@ -1900,6 +1916,448 @@ bool FWorldDirectorEnvironmentProfileAssetTest::RunTest(const FString& Parameter
 		TestTrue(*FString::Printf(TEXT("Biome palette covers %s"), *RequiredPlacementTag.ToString()),
 			PlacementTags.Contains(RequiredPlacementTag));
 	}
+	return !HasAnyErrors();
+}
+
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FWorldDirectorLandformCorpusTest,
+	"WorldDirector.WorldGeneration.LandformFromModelCorpus",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWorldDirectorLandformCorpusTest::RunTest(const FString& Parameters)
+{
+	// Real interpret-stage briefs. The old resolver took the first keyword in a fixed
+	// priority order anywhere in the prose and built 6 of the last 10 worlds on the
+	// wrong landform ("replacing ... coastal terrain" became a coast). Both the explicit
+	// landform field and the legacy prose fallback must honor what the brief commits to.
+	FString CorpusJson;
+	if (!TestTrue(TEXT("model-output-corpus.json loads"), LoadFixture(TEXT("model-output-corpus.json"), CorpusJson)))
+	{
+		return false;
+	}
+	TSharedPtr<FJsonObject> Root;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(CorpusJson);
+	const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
+	if (!TestTrue(TEXT("corpus parses"), FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid() &&
+		Root->TryGetArrayField(TEXT("entries"), Entries) && Entries != nullptr && Entries->Num() >= 10))
+	{
+		return false;
+	}
+	for (const TSharedPtr<FJsonValue>& Value : *Entries)
+	{
+		const TSharedPtr<FJsonObject> Entry = Value->AsObject();
+		const FString RunId = Entry->GetStringField(TEXT("runId"));
+		EWorldDirectorTerrainArchetype Expected = EWorldDirectorTerrainArchetype::Basin;
+		TestTrue(*FString::Printf(TEXT("%s expected landform parses"), *RunId),
+			FWorldDirectorPhysicalGenerator::TryParseLandform(Entry->GetStringField(TEXT("expectedLandform")), &Expected));
+		FWorldBrief Brief;
+		const TArray<TSharedPtr<FJsonValue>>* Preferences = nullptr;
+		if (Entry->GetObjectField(TEXT("brief"))->TryGetArrayField(TEXT("terrainPreferences"), Preferences))
+		{
+			for (const TSharedPtr<FJsonValue>& Preference : *Preferences)
+			{
+				Brief.TerrainPreferences.Add(Preference->AsString());
+			}
+		}
+		TestEqual(*FString::Printf(TEXT("%s legacy prose resolves to its committed landform"), *RunId),
+			FWorldDirectorPhysicalGenerator::ResolveTerrainArchetype(Brief, 1234), Expected);
+		// An explicit landform wins even when the prose names other landforms.
+		Brief.Landform = Entry->GetStringField(TEXT("expectedLandform"));
+		Brief.TerrainPreferences.Add(TEXT("No coast, no marsh, no ridge, no valley, no basin."));
+		TestEqual(*FString::Printf(TEXT("%s explicit landform wins"), *RunId),
+			FWorldDirectorPhysicalGenerator::ResolveTerrainArchetype(Brief, 1234), Expected);
+	}
+	FWorldBrief Invalid;
+	Invalid.Landform = TEXT("volcano");
+	TestFalse(TEXT("unsupported landform is rejected"),
+		FWorldDirectorPhysicalGenerator::TryParseLandform(Invalid.Landform, nullptr));
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FWorldDirectorCorpusPhysicalResolveTest,
+	"WorldDirector.WorldGeneration.ModelCorpusResolves",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWorldDirectorCorpusPhysicalResolveTest::RunTest(const FString& Parameters)
+{
+	// Every real model topology in the corpus must resolve to a physical plan with
+	// loadable certified shells, and purpose-matched shells must actually appear.
+	FString CorpusJson;
+	if (!TestTrue(TEXT("model-output-corpus.json loads"), LoadFixture(TEXT("model-output-corpus.json"), CorpusJson)))
+	{
+		return false;
+	}
+	TSharedPtr<FJsonObject> Root;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(CorpusJson);
+	const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
+	if (!TestTrue(TEXT("corpus parses"), FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid() &&
+		Root->TryGetArrayField(TEXT("entries"), Entries) && Entries != nullptr))
+	{
+		return false;
+	}
+	TSet<FString> ShellsUsed;
+	for (const TSharedPtr<FJsonValue>& Value : *Entries)
+	{
+		const TSharedPtr<FJsonObject> Entry = Value->AsObject();
+		const FString RunId = Entry->GetStringField(TEXT("runId"));
+		const TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+		Document->SetNumberField(TEXT("version"), 1);
+		Document->SetStringField(TEXT("id"), TEXT("world.corpus_") + RunId);
+		Document->SetNumberField(TEXT("seed"), Entry->GetNumberField(TEXT("seed")));
+		const TSharedPtr<FJsonObject> Brief = Entry->GetObjectField(TEXT("brief"));
+		Brief->SetStringField(TEXT("landform"), Entry->GetStringField(TEXT("expectedLandform")));
+		Document->SetObjectField(TEXT("brief"), Brief);
+		const TSharedPtr<FJsonObject> Topology = Entry->GetObjectField(TEXT("topology"));
+		Document->SetObjectField(TEXT("topology"), Topology->GetObjectField(TEXT("topology")));
+		for (const TCHAR* Field : {TEXT("locations"), TEXT("facts"), TEXT("threats")})
+		{
+			Document->SetArrayField(Field, Topology->GetArrayField(Field));
+		}
+		for (const TCHAR* Field : {TEXT("residents"), TEXT("households"), TEXT("relationships"),
+			TEXT("beliefs"), TEXT("events"), TEXT("changeProjects")})
+		{
+			Document->SetArrayField(Field, TArray<TSharedPtr<FJsonValue>>());
+		}
+		FString Json;
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Json);
+		FJsonSerializer::Serialize(Document, Writer);
+		FGeneratedWorldSpec Spec;
+		FValidationReport ParseReport;
+		if (!TestTrue(*FString::Printf(TEXT("%s loads as a canonical spec"), *RunId),
+			FWorldDirectorJson::LoadGeneratedWorldSpec(Json, Spec, ParseReport)))
+		{
+			continue;
+		}
+		FResolvedWorldPlan Plan;
+		FValidationReport Report;
+		const bool bResolved = FWorldDirectorCompiler::Resolve(Spec, Plan, Report, true);
+		TestTrue(*FString::Printf(TEXT("%s resolves with loadable certified assets"), *RunId), bResolved);
+		for (const FValidationIssue& Issue : Report.Issues)
+		{
+			if (Issue.Severity == EWorldDirectorValidationSeverity::Error)
+			{
+				AddError(FString::Printf(TEXT("%s %s %s %s"), *RunId, *Issue.Code.ToString(), *Issue.Path, *Issue.Message));
+			}
+		}
+		EWorldDirectorTerrainArchetype Expected = EWorldDirectorTerrainArchetype::Basin;
+		FWorldDirectorPhysicalGenerator::TryParseLandform(Entry->GetStringField(TEXT("expectedLandform")), &Expected);
+		TestEqual(*FString::Printf(TEXT("%s builds its landform"), *RunId), Plan.Terrain.Archetype, Expected);
+		for (const FResolvedLocationPlan& Location : Plan.Locations)
+		{
+			ShellsUsed.Add(Location.ShellAsset.GetAssetName().LeftChop(2));
+		}
+	}
+	AddInfo(FString::Printf(TEXT("Shells used across corpus: %s"), *FString::Join(ShellsUsed.Array(), TEXT(", "))));
+	TestTrue(TEXT("purpose-matched mill shell is used"), ShellsUsed.Contains(TEXT("BP_Cap_Workplace_Watermill_01")));
+	TestTrue(TEXT("purpose-matched civic hall is used"), ShellsUsed.Contains(TEXT("BP_Cap_Workplace_CivicHall_01")));
+	TestTrue(TEXT("corpus uses at least ten distinct shells"), ShellsUsed.Num() >= 10);
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FWorldDirectorResidentScheduleTest,
+	"WorldDirector.Simulation.OccupationSchedules",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWorldDirectorResidentScheduleTest::RunTest(const FString& Parameters)
+{
+	// Every resident used to share one 0/8/18/21 schedule and the whole town converged
+	// on the landmark at 18:00. Schedules now follow occupation and stay well-formed.
+	const FName Occupations[] = {
+		TEXT("Occupation.Farmer"), TEXT("Occupation.Merchant"), TEXT("Occupation.Guard"),
+		TEXT("Occupation.Herbalist"), TEXT("Occupation.Reeve"), TEXT("Occupation.Worker")
+	};
+	TSet<FString> DistinctShapes;
+	int32 EveningAtLandmark = 0;
+	int32 Total = 0;
+	for (int32 Index = 0; Index < 60; ++Index)
+	{
+		FResident Resident;
+		Resident.Id = FString::Printf(TEXT("resident.schedule.%02d"), Index);
+		Resident.HomeLocationId = TEXT("home");
+		Resident.WorkplaceLocationId = TEXT("work");
+		Resident.OccupationTag = Occupations[Index % UE_ARRAY_COUNT(Occupations)];
+		const TArray<FWorldDirectorScheduleStop> Schedule =
+			FWorldDirectorCompiler::BuildResidentSchedule(Resident, TEXT("landmark"), 4242);
+		++Total;
+		TestTrue(*FString::Printf(TEXT("%s starts at midnight"), *Resident.Id),
+			!Schedule.IsEmpty() && Schedule[0].Hour == 0);
+		FString Shape;
+		bool bVisitsWork = false;
+		for (int32 StopIndex = 0; StopIndex < Schedule.Num(); ++StopIndex)
+		{
+			TestTrue(*FString::Printf(TEXT("%s hours ascend"), *Resident.Id),
+				StopIndex == 0 || Schedule[StopIndex].Hour > Schedule[StopIndex - 1].Hour);
+			bVisitsWork |= Schedule[StopIndex].LocationId == TEXT("work");
+			EveningAtLandmark += Schedule[StopIndex].LocationId == TEXT("landmark") ? 1 : 0;
+			Shape += FString::Printf(TEXT("%d:%s;"), Schedule[StopIndex].Hour, *Schedule[StopIndex].LocationId);
+		}
+		TestTrue(*FString::Printf(TEXT("%s works"), *Resident.Id), bVisitsWork);
+		DistinctShapes.Add(Shape);
+	}
+	TestTrue(TEXT("schedules vary by occupation"), DistinctShapes.Num() >= 6);
+	TestTrue(TEXT("not everyone spends the evening at the landmark"), EveningAtLandmark < Total);
+	TestTrue(TEXT("some residents gather at the landmark"), EveningAtLandmark > Total / 3);
+	return !HasAnyErrors();
+}
+
+
+namespace
+{
+int32 CountDressing(const FResolvedWorldPlan& Plan, const TCHAR* MeshWord, const TCHAR* BiomeWord = nullptr)
+{
+	int32 Count = 0;
+	for (const FWorldDirectorDressingInstance& Instance : Plan.Dressing)
+	{
+		Count += Instance.MeshAsset.GetAssetName().Contains(MeshWord) &&
+			(BiomeWord == nullptr || Instance.BiomeTag.ToString().Contains(BiomeWord));
+	}
+	return Count;
+}
+
+int32 CountFeatures(const FResolvedWorldPlan& Plan, const TCHAR* FeatureTag)
+{
+	int32 Count = 0;
+	for (const FWorldDirectorFeatureInstance& Feature : Plan.Features)
+	{
+		Count += Feature.FeatureTag == FeatureTag;
+	}
+	return Count;
+}
+
+const FWorldDirectorExpressionEntry* FindExpression(const FResolvedWorldPlan& Plan, const FString& Field)
+{
+	return Plan.Expression.FindByPredicate([&Field](const FWorldDirectorExpressionEntry& Entry) { return Entry.Field == Field; });
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FWorldDirectorPresentationFeaturesTest,
+	"WorldDirector.WorldGeneration.PresentationFeatures",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWorldDirectorPresentationFeaturesTest::RunTest(const FString& Parameters)
+{
+	// Each brief.presentation choice must place the pack pieces it promises in the
+	// manifest, and the default choice must add nothing to the original world.
+	FString SourceJson;
+	FGeneratedWorldSpec BaseSpec;
+	FValidationReport ParseReport;
+	if (!TestTrue(TEXT("living-town fixture loads"), LoadFixture(TEXT("living-town.json"), SourceJson) &&
+		FWorldDirectorJson::LoadGeneratedWorldSpec(SourceJson, BaseSpec, ParseReport)))
+	{
+		return false;
+	}
+	auto ResolveWith = [this, &BaseSpec](const TFunction<void(FWorldPresentation&)>& Configure, FResolvedWorldPlan& OutPlan)
+	{
+		FGeneratedWorldSpec Spec = BaseSpec;
+		Configure(Spec.Brief.Presentation);
+		FValidationReport Validation = FWorldDirectorValidator::Validate(Spec, MakeFixtureCapabilityTags());
+		FValidationReport Report;
+		const bool bResolved = Validation.bValid && FWorldDirectorCompiler::Resolve(Spec, OutPlan, Report, true);
+		for (const FValidationIssue& Issue : Report.Issues)
+		{
+			if (Issue.Severity == EWorldDirectorValidationSeverity::Error)
+			{
+				AddError(FString::Printf(TEXT("%s %s %s"), *Issue.Code.ToString(), *Issue.Path, *Issue.Message));
+			}
+		}
+		return bResolved;
+	};
+
+	FResolvedWorldPlan Default;
+	TestTrue(TEXT("default presentation resolves"), ResolveWith([](FWorldPresentation&) {}, Default));
+	TestEqual(TEXT("default presentation spawns no features"), Default.Features.Num(), 0);
+	TestEqual(TEXT("default presentation adds no walls"), CountDressing(Default, TEXT("wall_wood")), 0);
+	TestEqual(TEXT("default presentation adds no justice props"), CountDressing(Default, TEXT("gallows")), 0);
+	for (const FWorldDirectorPresentation::FField& Field : FWorldDirectorPresentation::Fields())
+	{
+		const FWorldDirectorExpressionEntry* Entry = FindExpression(Default, FString(TEXT("brief.presentation.")) + Field.Name);
+		TestTrue(*FString::Printf(TEXT("expression report covers %s"), Field.Name), Entry != nullptr);
+	}
+	TestNotNull(TEXT("expression report covers the landform"), FindExpression(Default, TEXT("brief.landform")));
+	TestTrue(TEXT("expression report lists prose-only fields"), Default.Expression.ContainsByPredicate(
+		[](const FWorldDirectorExpressionEntry& Entry) { return Entry.Outcome == TEXT("TextOnly"); }));
+	TestTrue(TEXT("expression report explains every building"), Default.Expression.FilterByPredicate(
+		[](const FWorldDirectorExpressionEntry& Entry) { return Entry.Field.StartsWith(TEXT("locations[")); }).Num() == BaseSpec.Locations.Num());
+
+	FResolvedWorldPlan Fenced;
+	TestTrue(TEXT("fenced resolves"), ResolveWith([](FWorldPresentation& P) { P.Fortification = TEXT("fenced"); }, Fenced));
+	TestTrue(TEXT("fenced rings the town with fence segments"), CountDressing(Fenced, TEXT("fence"), TEXT("FenceRing")) >= 12);
+
+	FResolvedWorldPlan Stockade;
+	TestTrue(TEXT("stockade resolves"), ResolveWith([](FWorldPresentation& P)
+	{
+		P.Fortification = TEXT("stockade");
+		P.Fire = TEXT("braziers");
+		P.Justice = TEXT("grim");
+	}, Stockade));
+	const int32 Walls = CountDressing(Stockade, TEXT("wall_wood"), TEXT("FortificationSolid"));
+	AddInfo(FString::Printf(TEXT("stockade: walls=%d gates=%d towers=%d barricades=%d braziers=%d"), Walls,
+		CountDressing(Stockade, TEXT("gate_frame")), CountDressing(Stockade, TEXT("watchtower")),
+		CountDressing(Stockade, TEXT("spikes")), CountFeatures(Stockade, TEXT("Feature.Brazier"))));
+	TestTrue(TEXT("stockade builds a palisade"), Walls >= 12);
+	TestTrue(TEXT("stockade builds watchtowers"), CountDressing(Stockade, TEXT("watchtower"), TEXT("FortificationSolid")) >= 2);
+	TestTrue(TEXT("stockade leaves gates where roads cross"), CountDressing(Stockade, TEXT("gate_frame")) >= 1);
+	for (const FWorldDirectorDressingInstance& Instance : Stockade.Dressing)
+	{
+		if (Instance.BiomeTag == TEXT("Biome.FortificationSolid"))
+		{
+			const FVector2D Position(Instance.Transform.GetLocation());
+			for (const FResolvedRoutePlan& Route : Stockade.Routes)
+			{
+				for (int32 Index = 1; Index < Route.ControlPoints.Num(); ++Index)
+				{
+					const FVector2D A(Route.ControlPoints[Index - 1]);
+					const FVector2D B(Route.ControlPoints[Index]);
+					const FVector2D Closest = FMath::ClosestPointOnSegment2D(Position, A, B);
+					if (FVector2D::Distance(Closest, Position) < Route.WidthCentimeters * 0.5f + 150.0f)
+					{
+						AddError(FString::Printf(TEXT("solid %s blocks route %s"), *Instance.MeshAsset.GetAssetName(), *Route.FromLocationId));
+					}
+				}
+			}
+		}
+	}
+	TestTrue(TEXT("braziers flank the landmark door"), CountFeatures(Stockade, TEXT("Feature.Brazier")) >= 2);
+	TestEqual(TEXT("grim justice raises one gallows"), CountDressing(Stockade, TEXT("gallows")), 1);
+	TestEqual(TEXT("grim justice adds a guillotine"), CountDressing(Stockade, TEXT("guillotine")), 1);
+	TestTrue(TEXT("grim justice lays out coffins"), CountDressing(Stockade, TEXT("coffin")) >= 1);
+
+	FResolvedWorldPlan Again;
+	ResolveWith([](FWorldPresentation& P)
+	{
+		P.Fortification = TEXT("stockade");
+		P.Fire = TEXT("braziers");
+		P.Justice = TEXT("grim");
+	}, Again);
+	TestEqual(TEXT("presentation placement is deterministic"), Again.DressingFingerprint, Stockade.DressingFingerprint);
+	TestEqual(TEXT("presentation features are deterministic"), Again.Features.Num(), Stockade.Features.Num());
+
+	FResolvedWorldPlan Vigil;
+	TestTrue(TEXT("vigil resolves"), ResolveWith([](FWorldPresentation& P) { P.Fire = TEXT("vigil"); }, Vigil));
+	TestTrue(TEXT("vigil lines streets with braziers"), CountFeatures(Vigil, TEXT("Feature.Brazier")) > CountFeatures(Stockade, TEXT("Feature.Brazier")) - 4);
+	TestTrue(TEXT("vigil lights watchfires"), CountFeatures(Vigil, TEXT("Feature.Watchfire")) >= 1);
+
+	FResolvedWorldPlan Smouldering;
+	TestTrue(TEXT("smouldering resolves"), ResolveWith([](FWorldPresentation& P) { P.Fire = TEXT("smouldering"); }, Smouldering));
+	TestTrue(TEXT("smoke rises over threatened buildings"), CountFeatures(Smouldering, TEXT("Feature.Smoke")) >= 1);
+
+	FResolvedWorldPlan DryHarbor;
+	TestTrue(TEXT("harbor on a basin resolves"), ResolveWith([](FWorldPresentation& P) { P.WaterLife = TEXT("harbor"); }, DryHarbor));
+	const FWorldDirectorExpressionEntry* WaterEntry = FindExpression(DryHarbor, TEXT("brief.presentation.waterLife"));
+	TestTrue(TEXT("a basin reports water life as not applicable"),
+		WaterEntry != nullptr && WaterEntry->Outcome == TEXT("NotApplicable"));
+
+	FGeneratedWorldSpec Invalid = BaseSpec;
+	Invalid.Brief.Presentation.Fortification = TEXT("castle");
+	TestFalse(TEXT("unsupported presentation values fail validation"),
+		FWorldDirectorValidator::Validate(Invalid, MakeFixtureCapabilityTags()).bValid);
+
+	// Specs saved before brief.presentation existed load with the defaults.
+	TSharedPtr<FJsonObject> Root;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(SourceJson);
+	if (TestTrue(TEXT("fixture parses as JSON"), FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid()))
+	{
+		Root->GetObjectField(TEXT("brief"))->RemoveField(TEXT("presentation"));
+		FString LegacyJson;
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&LegacyJson);
+		FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+		FGeneratedWorldSpec Legacy;
+		FValidationReport LegacyReport;
+		TestTrue(TEXT("legacy brief loads"), FWorldDirectorJson::LoadGeneratedWorldSpec(LegacyJson, Legacy, LegacyReport));
+		TestTrue(TEXT("legacy brief gets the default presentation"),
+			FWorldDirectorPresentation::IsDefault(Legacy.Brief.Presentation));
+		TestTrue(TEXT("legacy load is reported"), LegacyReport.Issues.ContainsByPredicate(
+			[](const FValidationIssue& Issue) { return Issue.Code == TEXT("json.legacy_brief_presentation"); }));
+	}
+	return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FWorldDirectorPresentationWaterTest,
+	"WorldDirector.WorldGeneration.PresentationWaterLife",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWorldDirectorPresentationWaterTest::RunTest(const FString& Parameters)
+{
+	// Real model topologies on water landforms get piers and boats when they ask for a
+	// harbor; dry landforms report the choice as not applicable.
+	FString CorpusJson;
+	if (!TestTrue(TEXT("model-output-corpus.json loads"), LoadFixture(TEXT("model-output-corpus.json"), CorpusJson)))
+	{
+		return false;
+	}
+	TSharedPtr<FJsonObject> Root;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(CorpusJson);
+	const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
+	if (!TestTrue(TEXT("corpus parses"), FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid() &&
+		Root->TryGetArrayField(TEXT("entries"), Entries) && Entries != nullptr))
+	{
+		return false;
+	}
+	int32 WaterWorlds = 0;
+	int32 WaterWorldsWithPiers = 0;
+	for (const TSharedPtr<FJsonValue>& Value : *Entries)
+	{
+		const TSharedPtr<FJsonObject> Entry = Value->AsObject();
+		const FString RunId = Entry->GetStringField(TEXT("runId"));
+		const FString Landform = Entry->GetStringField(TEXT("expectedLandform"));
+		const TSharedRef<FJsonObject> Document = MakeShared<FJsonObject>();
+		Document->SetNumberField(TEXT("version"), 1);
+		Document->SetStringField(TEXT("id"), TEXT("world.water_") + RunId);
+		Document->SetNumberField(TEXT("seed"), Entry->GetNumberField(TEXT("seed")));
+		const TSharedPtr<FJsonObject> Brief = Entry->GetObjectField(TEXT("brief"));
+		Brief->SetStringField(TEXT("landform"), Landform);
+		Document->SetObjectField(TEXT("brief"), Brief);
+		const TSharedPtr<FJsonObject> Topology = Entry->GetObjectField(TEXT("topology"));
+		Document->SetObjectField(TEXT("topology"), Topology->GetObjectField(TEXT("topology")));
+		for (const TCHAR* Field : {TEXT("locations"), TEXT("facts"), TEXT("threats")})
+		{
+			Document->SetArrayField(Field, Topology->GetArrayField(Field));
+		}
+		for (const TCHAR* Field : {TEXT("residents"), TEXT("households"), TEXT("relationships"),
+			TEXT("beliefs"), TEXT("events"), TEXT("changeProjects")})
+		{
+			Document->SetArrayField(Field, TArray<TSharedPtr<FJsonValue>>());
+		}
+		FString Json;
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Json);
+		FJsonSerializer::Serialize(Document, Writer);
+		FGeneratedWorldSpec Spec;
+		FValidationReport ParseReport;
+		if (!TestTrue(*FString::Printf(TEXT("%s loads"), *RunId), FWorldDirectorJson::LoadGeneratedWorldSpec(Json, Spec, ParseReport)))
+		{
+			continue;
+		}
+		Spec.Brief.Presentation.WaterLife = TEXT("harbor");
+		FResolvedWorldPlan Plan;
+		FValidationReport Report;
+		TestTrue(*FString::Printf(TEXT("%s resolves with a harbor"), *RunId), FWorldDirectorCompiler::Resolve(Spec, Plan, Report, true));
+		const FWorldDirectorExpressionEntry* WaterEntry = FindExpression(Plan, TEXT("brief.presentation.waterLife"));
+		const bool bWaterLandform = Landform == TEXT("coast") || Landform == TEXT("valley") || Landform == TEXT("marsh");
+		const int32 Piers = CountDressing(Plan, TEXT("walkway"));
+		AddInfo(FString::Printf(TEXT("%s %s: piers=%d boats=%d bridges=%d -> %s"), *RunId, *Landform, Piers,
+			CountDressing(Plan, TEXT("rowboat")), CountDressing(Plan, TEXT("bridge")),
+			WaterEntry != nullptr ? *WaterEntry->Detail : TEXT("missing")));
+		if (bWaterLandform)
+		{
+			++WaterWorlds;
+			WaterWorldsWithPiers += Piers > 0;
+		}
+		else
+		{
+			TestTrue(*FString::Printf(TEXT("%s reports no water"), *RunId),
+				WaterEntry != nullptr && WaterEntry->Outcome == TEXT("NotApplicable") && Piers == 0);
+		}
+	}
+	TestTrue(TEXT("corpus includes water landforms"), WaterWorlds > 0);
+	TestTrue(TEXT("most water worlds get piers"), WaterWorldsWithPiers * 2 >= WaterWorlds && WaterWorldsWithPiers > 0);
 	return !HasAnyErrors();
 }
 

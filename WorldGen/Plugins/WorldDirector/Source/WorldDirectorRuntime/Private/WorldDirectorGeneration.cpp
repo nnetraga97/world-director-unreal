@@ -1,11 +1,15 @@
 #include "WorldDirectorGeneration.h"
 
 #include "Async/Async.h"
+#include "Dom/JsonObject.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformProcess.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/ScopeLock.h"
 #include "Misc/Paths.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 namespace
 {
@@ -181,4 +185,110 @@ private:
 TSharedRef<IWorldDirectorProvider> CreateWorldDirectorLocalCompanionProvider()
 {
 	return MakeShared<FWorldDirectorLocalCompanionProvider>();
+}
+
+TArray<FWorldDirectorModelOption> LoadWorldDirectorModelCatalog()
+{
+	TArray<FWorldDirectorModelOption> Options;
+	FString CodexHome = FPlatformMisc::GetEnvironmentVariable(TEXT("CODEX_HOME"));
+	if (CodexHome.IsEmpty())
+	{
+		CodexHome = FPaths::Combine(FPlatformProcess::UserHomeDir(), TEXT(".codex"));
+	}
+	FString CatalogJson;
+	if (!FFileHelper::LoadFileToString(CatalogJson, *FPaths::Combine(CodexHome, TEXT("models_cache.json"))))
+	{
+		return Options;
+	}
+	TSharedPtr<FJsonObject> Root;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(CatalogJson);
+	const TArray<TSharedPtr<FJsonValue>>* Models = nullptr;
+	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid() ||
+		!Root->TryGetArrayField(TEXT("models"), Models) || Models == nullptr)
+	{
+		return Options;
+	}
+	// World generation must finish inside the run budget; deeper efforts were
+	// measured to exceed it, so they are not offered here.
+	static const TCHAR* const GenerationEfforts[] = {TEXT("low"), TEXT("medium"), TEXT("high")};
+	for (const TSharedPtr<FJsonValue>& Value : *Models)
+	{
+		const TSharedPtr<FJsonObject> Model = Value.IsValid() ? Value->AsObject() : nullptr;
+		FString Slug;
+		FString Visibility;
+		if (!Model.IsValid() || !Model->TryGetStringField(TEXT("slug"), Slug) || Slug.IsEmpty())
+		{
+			continue;
+		}
+		Model->TryGetStringField(TEXT("visibility"), Visibility);
+		if (!Visibility.IsEmpty() && Visibility != TEXT("list"))
+		{
+			continue;
+		}
+		FWorldDirectorModelOption& Option = Options.AddDefaulted_GetRef();
+		Option.Slug = Slug;
+		Model->TryGetStringField(TEXT("display_name"), Option.DisplayName);
+		Model->TryGetStringField(TEXT("description"), Option.Description);
+		TSet<FString> Supported;
+		const TArray<TSharedPtr<FJsonValue>>* Levels = nullptr;
+		if (Model->TryGetArrayField(TEXT("supported_reasoning_levels"), Levels) && Levels != nullptr)
+		{
+			for (const TSharedPtr<FJsonValue>& Level : *Levels)
+			{
+				FString Effort;
+				if (Level.IsValid() && Level->AsObject().IsValid() &&
+					Level->AsObject()->TryGetStringField(TEXT("effort"), Effort))
+				{
+					Supported.Add(Effort);
+				}
+			}
+		}
+		for (const TCHAR* Effort : GenerationEfforts)
+		{
+			if (Supported.IsEmpty() || Supported.Contains(Effort))
+			{
+				Option.ReasoningEfforts.Add(Effort);
+			}
+		}
+		Model->TryGetStringField(TEXT("default_reasoning_level"), Option.DefaultReasoningEffort);
+		if (!Option.ReasoningEfforts.Contains(Option.DefaultReasoningEffort))
+		{
+			Option.DefaultReasoningEffort = Option.ReasoningEfforts.Contains(TEXT("medium"))
+				? TEXT("medium") : (Option.ReasoningEfforts.IsEmpty() ? FString() : Option.ReasoningEfforts[0]);
+		}
+	}
+	return Options;
+}
+
+FString GetWorldDirectorDefaultModel()
+{
+	FString Configured;
+	GConfig->GetString(TEXT("WorldDirector"), TEXT("DefaultModel"), Configured, GGameIni);
+	Configured.TrimStartAndEndInline();
+	const TArray<FWorldDirectorModelOption> Catalog = LoadWorldDirectorModelCatalog();
+	if (Catalog.IsEmpty())
+	{
+		return Configured;
+	}
+	if (!Configured.IsEmpty() && Catalog.ContainsByPredicate(
+		[&Configured](const FWorldDirectorModelOption& Option) { return Option.Slug == Configured; }))
+	{
+		return Configured;
+	}
+	return Catalog[0].Slug;
+}
+
+FString GetWorldDirectorDefaultReasoningEffort(const FString& Model)
+{
+	FString Configured;
+	GConfig->GetString(TEXT("WorldDirector"), TEXT("DefaultReasoningEffort"), Configured, GGameIni);
+	Configured = Configured.TrimStartAndEnd().ToLower();
+	for (const FWorldDirectorModelOption& Option : LoadWorldDirectorModelCatalog())
+	{
+		if (Option.Slug == Model)
+		{
+			return Option.ReasoningEfforts.Contains(Configured) ? Configured : Option.DefaultReasoningEffort;
+		}
+	}
+	return Configured;
 }

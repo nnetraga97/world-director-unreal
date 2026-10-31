@@ -90,6 +90,45 @@ struct WORLDDIRECTORRUNTIME_API FResidentMemory
 	float EmotionalSignificance = 0.0f;
 };
 
+/**
+ * Closed presentation choices the model makes in the interpret stage. Every value maps to
+ * an operation the generator or runtime can perform with the certified asset pack; the
+ * allowed values live in FWorldDirectorPresentation. Defaults reproduce the look of worlds
+ * generated before these choices existed.
+ */
+USTRUCT(BlueprintType)
+struct WORLDDIRECTORRUNTIME_API FWorldPresentation
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Fortification = TEXT("open");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString WaterLife = TEXT("none");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Justice = TEXT("lenient");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Fire = TEXT("hearths");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString TimeOfDay = TEXT("dawn");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Weather = TEXT("clear");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Season = TEXT("summer");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString RoofPalette = TEXT("natural");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString AuthorityColor = TEXT("natural");
+};
+
 USTRUCT(BlueprintType)
 struct WORLDDIRECTORRUNTIME_API FWorldBrief
 {
@@ -112,6 +151,14 @@ struct WORLDDIRECTORRUNTIME_API FWorldBrief
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TArray<FString> Premises;
+
+	// One of basin, valley, ridge, coast, or marsh. Empty only in legacy specs
+	// saved before the field existed; those fall back to TerrainPreferences.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Landform;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FWorldPresentation Presentation;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TArray<FString> TerrainPreferences;
@@ -558,6 +605,40 @@ struct WORLDDIRECTORRUNTIME_API FResolvedLocationPlan
 	float GroundSlopeDegrees = 0.0f;
 };
 
+/** Whether a compiled world is actually playable, recorded after navigation finishes building. */
+USTRUCT(BlueprintType)
+struct WORLDDIRECTORRUNTIME_API FWorldDirectorPlayabilityRecord
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	bool bRecorded = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	bool bNavigationBuilt = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	double NavigationWaitSeconds = 0.0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	bool bNavigationViable = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	TArray<FString> NavigationIssues;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	int32 SpawnedLocations = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	int32 SpawnedResidents = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	FString TerrainArchetype;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly)
+	FString ProjectState;
+};
+
 USTRUCT(BlueprintType)
 struct WORLDDIRECTORRUNTIME_API FWorldDirectorScheduleStop
 {
@@ -754,6 +835,45 @@ struct WORLDDIRECTORRUNTIME_API FWorldDirectorDressingInstance
 	FName BiomeTag;
 };
 
+/** A pack Blueprint (fire with light) or particle system the town spawns as an actor/emitter. */
+USTRUCT(BlueprintType)
+struct WORLDDIRECTORRUNTIME_API FWorldDirectorFeatureInstance
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FSoftObjectPath Asset;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FTransform Transform;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FName FeatureTag;
+};
+
+/**
+ * One model-authored value and what it did to the world: Applied (changed the output),
+ * Defaulted (fell through to a fallback), NotApplicable (valid but impossible here), or
+ * TextOnly (only ever shown as prose).
+ */
+USTRUCT(BlueprintType)
+struct WORLDDIRECTORRUNTIME_API FWorldDirectorExpressionEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Field;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Value;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FName Outcome;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Detail;
+};
+
 USTRUCT(BlueprintType)
 struct WORLDDIRECTORRUNTIME_API FResolvedWorldPlan
 {
@@ -806,6 +926,16 @@ struct WORLDDIRECTORRUNTIME_API FResolvedWorldPlan
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	TArray<FWorldDirectorDressingInstance> Dressing;
+
+	/** Effective presentation (brief choice plus any test override) the runtime applies. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FWorldPresentation Presentation;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TArray<FWorldDirectorFeatureInstance> Features;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TArray<FWorldDirectorExpressionEntry> Expression;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FString LayoutFingerprint;

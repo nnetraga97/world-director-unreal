@@ -9,6 +9,8 @@
     "settlementIdentity": "Invalid test settlement",
     "playerPrompt": "",
     "premises": [],
+    "landform": "basin",
+    "presentation": {"fortification": "open", "waterLife": "none", "justice": "lenient", "fire": "hearths", "timeOfDay": "dawn", "weather": "clear", "season": "summer", "roofPalette": "natural", "authorityColor": "natural"},
     "terrainPreferences": ["Unsupported direct asset terrain"],
     "requiredCapabilityTags": ["Capability.DoesNotExist"]
   },

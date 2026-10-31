@@ -80,6 +80,57 @@ metadata includes semantic archetype, style, capacity, purposes, supported
 states, front-door entrance policy, five-degree slope tolerance, and dynamic
 navigation/door-clearance requirements.
 
+### Purpose-matched public shells (2026-10-31)
+
+Four more game-owned child Blueprints wrap Fantastic Village houses whose front
+door sits on the local −Y face, where the compiler places the certified entrance.
+They are routed by semantic identity so a mill reads as a mill: at most one
+watermill and one windmill per town, and up to two civic halls for headquarters
+or council locations. Houses 9 and 10 were measured but not wrapped because their
+doors face −X.
+
+| Wrapper | Parent | Use | Measured bounds (cm) | Interior |
+|---|---|---|---:|---|
+| `BP_Cap_Workplace_Watermill_01` | `BP_BLD_house_13` (waterwheel) | Workplaces named mill/weir/sluice | 1084 × 912 | Small home template |
+| `BP_Cap_Workplace_Windmill_01` | `BP_BLD_house_14` (windmill sails) | Granary/grain/flour workplaces | 1707 × 962 | Roomy home template |
+| `BP_Cap_Workplace_CivicHall_01` | `BP_BLD_house_11` | Headquarters, council, court | 1581 × 1510 | Workplace template |
+| `BP_Cap_Workplace_CivicHall_02` | `BP_BLD_house_12` | Second civic hall | 1301 × 1303 | Workplace template |
+
+`WorldDirector.WorldGeneration.ModelCorpusResolves` resolves all 12 saved real
+model topologies with asset loading and requires these shells to appear; the
+in-game generation and player flows pass entrance and navigation viability with
+them.
+
+## Presentation dressing (2026-10-31)
+
+`brief.presentation` places further Fantastic Village pieces through new profile
+placement tags in `UWorldEnvironmentProfile`. Placement draws from its own seed
+stream after every other dressing pass, so default choices leave existing worlds
+and their fingerprints unchanged.
+
+| Tag | Pack asset | Measured size (cm) | Notes |
+|---|---|---:|---|
+| `Dressing.PalisadeWall` | `SM_PROP_wall_wood` | 360 × 626 × 531 | Tiled every 600 cm around the town hull; collides and cuts the navmesh |
+| `Dressing.PalisadeGate` | `SM_PROP_wall_wood_gate_frame_01` | 153 × 648 × 747 | Where roads cross, or toward the nearest fields when none do; no collision |
+| `Dressing.Watchtower` | `SM_PROP_watchtower_wood_01`, `_02_small` | 501 × 448 × 1121 | Stockade only; collides |
+| `Dressing.Barricade` | `SM_PROP_spikes_v02_01`, `_v01_01` | 403 × 244 × 221 | Stockade only, outside every fourth wall segment |
+| `Dressing.Pier` | `SM_PROP_walkway_wood` | 291 × 579 × 65 | From the nearest shores toward open water |
+| `Dressing.Boat` | `SM_PROP_rowboat` | 173 × 406 × 213 | Moored beside pier ends |
+| `Dressing.Bridge` | `SM_PROP_bridge_wood_01`, `_02` | 199 × 442 × 143 | Over wet stretches of existing roads |
+| `Dressing.Dockside` | barrel, crate | — | Harbor only |
+| `Dressing.Gallows`, `Dressing.Guillotine`, `Dressing.Coffin` | `SM_PROP_gallows`, `SM_PROP_guillotine`, `SM_PROP_coffin` | 390 × 310 × 545 (gallows) | Justice |
+| `Dressing.BurntPile` | `SM_PROP_firepit_woodpile` | 66 × 73 × 28 | Smouldering |
+| `Feature.Brazier`, `Feature.Watchfire` | `BP_PROP_brazier_01/03`, `BP_PROP_campfire_01/02` | — | Spawned as actors: the Blueprints carry their own fire particles and point light |
+| `Feature.Smoke` | `PS_FX_smoke` | — | Spawned as an emitter over threat-affected buildings |
+
+Roof colours swap in one of the pack's five roof materials (`MI_rooftiles_01`–`05`:
+teal, slate, tan, rust, plum by average texture colour) and then apply `Base Color
+Tint` on `M_Master_opaque_normal`. Tinting alone multiplies an already coloured
+texture, so a crimson tint on a teal roof came out grey; the swap keeps hues true.
+Season tints and weather wind use `Base Color Tint`, `Wind Speed`, `Wind Influence`,
+and `Wind Weight` on the transparent plant and grass masters; flags take wind but
+`M_Master_flags_wind` has no tint parameter, so faction colour shows on roofs only.
+
 ## Interior templates and entrances
 
 | Template | Room / opening | Certified contents | Compatible shell class |

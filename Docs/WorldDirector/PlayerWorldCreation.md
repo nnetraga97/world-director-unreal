@@ -4,13 +4,15 @@ Normal play now starts on `L_WorldDirectorTown` with a native **Create a Living
 World** menu instead of compiling the authored fixture. The player may enter a
 prompt or leave it blank, choose a reproducible positive seed, and select
 the Codex model and reasoning effort before selecting **Create World**. The
-default balanced selection is `gpt-5.6-terra` with `medium` reasoning. The
+model list comes from the installed Codex CLI's catalog; the default is
+`[WorldDirector] DefaultModel` in `Config/DefaultGame.ini` (`gpt-6.1-sol`,
+`medium`) when Codex serves it, otherwise the first catalog model. The
 default path invokes the real local CLI companion. The clearly labelled debug
 checkbox uses the deterministic fixture and never calls a model.
 
 The menu remains responsive while the director runs the asynchronous
 `interpret -> topology -> layout -> population -> integrate/repair` pipeline.
-It exposes the current stage, elapsed time, accepted stages, repair count, and
+It exposes the current stage, elapsed time against the run budget, accepted stages, repair count, and
 validation-issue count. **Cancel** terminates the companion process. A failed
 run leaves the menu open with a useful error and preserves its run artifacts.
 

@@ -4,6 +4,7 @@
 #include "WorldDirectorJson.h"
 #include "WorldDirectorPhysicalGenerator.h"
 #include "WorldDirectorCompiler.h"
+#include "WorldDirectorPresentation.h"
 #include "WorldDirectorValidation.h"
 #include "WorldDirectorTownActors.h"
 #include "AIController.h"
@@ -18,11 +19,17 @@
 #include "Components/StateTreeComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/DirectionalLight.h"
+#include "Engine/ExponentialHeightFog.h"
+#include "Engine/PostProcessVolume.h"
+#include "Engine/SkyLight.h"
+#include "Components/ExponentialHeightFogComponent.h"
+#include "Components/SkyLightComponent.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerController.h"
 #include "GameplayTagContainer.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
+#include "Navigation/PathFollowingComponent.h"
 #include "SmartObjectComponent.h"
 #include "SmartObjectRequestTypes.h"
 #include "SmartObjectSubsystem.h"
@@ -283,6 +290,10 @@ void UTownSimulationSubsystem::Deinitialize()
 
 void UTownSimulationSubsystem::ShutdownLivingTown()
 {
+	if (bAtmosphereBaselineCaptured && GetWorld() != nullptr && !GetWorld()->bIsTearingDown)
+	{
+		ApplyAtmosphere(FWorldPresentation());
+	}
 	for (const TPair<FString, FSmartObjectClaimHandle>& Pair : ResidentClaims)
 	{
 		if (USmartObjectSubsystem* SmartObjects = GetWorld()
@@ -293,8 +304,13 @@ void UTownSimulationSubsystem::ShutdownLivingTown()
 	}
 	ResidentClaims.Reset();
 	ResidentClaimLocations.Reset();
+	ResidentMoveTargets.Reset();
 	LivingTown = nullptr;
 	bSimulationEnabled = false;
+	bWaitingForNavigation = false;
+	bThreatAlertActive = false;
+	ThreatAlertResidents.Reset();
+	ThreatAlertRefugeId.Reset();
 	ResidentStates.Reset();
 	RuntimeBeliefs.Reset();
 	ClosedFactIds.Reset();
@@ -329,7 +345,9 @@ bool UTownSimulationSubsystem::InitializeLivingTown(
 	}
 	LivingSpec = Spec;
 	LivingTown = Town;
-	ElapsedSimulationMinutes = 6 * 60;
+	const FWorldPresentation Presentation = Town != nullptr ? Town->GetCompiledPlan().Presentation : FWorldPresentation();
+	ElapsedSimulationMinutes = FWorldDirectorPresentation::StartMinute(Presentation.TimeOfDay);
+	ApplyAtmosphere(Presentation);
 	FractionalMinutes = 0.0f;
 	ResidentStates.Reset();
 	RuntimeBeliefs.Reset();
@@ -338,6 +356,18 @@ bool UTownSimulationSubsystem::InitializeLivingTown(
 	RelationshipEventCount = 0;
 	LastBeliefSharingMinute = INDEX_NONE;
 	LastRelationshipEventDay = INDEX_NONE;
+	bThreatAlertActive = false;
+	LastThreatAlertDay = INDEX_NONE;
+	ThreatAlertCount = 0;
+	ThreatAlertRefugeId.Reset();
+	ThreatAlertResidents.Reset();
+	ResidentMoveTargets.Reset();
+	RuntimeEventLog.Reset();
+	PlayerRapport.Reset();
+	for (const FWorldEvent& Event : LivingSpec.Events)
+	{
+		RuntimeEventLog.Add(FString::Printf(TEXT("Day %d (history): %s"), Event.Day, *Event.Summary));
+	}
 	for (const FWorldFact& Fact : LivingSpec.Facts)
 	{
 		ClosedFactIds.Add(Fact.Id);
@@ -387,14 +417,123 @@ void UTownSimulationSubsystem::AdvanceSimulationMinutes(const int32 Minutes)
 		return;
 	}
 	ElapsedSimulationMinutes += Minutes;
+	ProcessThreatAlerts();
 	ResolveSimulationState(Minutes >= 60);
-	if (UChangeProjectSubsystem* ChangeProjects = GetWorld()->GetSubsystem<UChangeProjectSubsystem>())
+	// Change projects test physical access with real paths. Evaluating them while the
+	// freshly compiled town's navmesh is still generating failed every path and left
+	// every generated project Delayed on its first frame.
+	bWaitingForNavigation = UNavigationSystemV1::IsNavigationBeingBuilt(GetWorld());
+	if (!bWaitingForNavigation)
 	{
-		ChangeProjects->AdvanceProjects(ElapsedSimulationMinutes);
+		if (UChangeProjectSubsystem* ChangeProjects = GetWorld()->GetSubsystem<UChangeProjectSubsystem>())
+		{
+			ChangeProjects->AdvanceProjects(ElapsedSimulationMinutes);
+		}
 	}
 	ProcessBeliefSharing();
 	ProcessRelationshipEvents();
 	UpdateDayNightLighting();
+}
+
+void UTownSimulationSubsystem::RecordRuntimeEvent(const FString& Message)
+{
+	const FString Entry = FString::Printf(TEXT("Day %d, %02d:%02d - %s"),
+		GetSimulationDay(), GetMinuteOfDay() / 60, GetMinuteOfDay() % 60, *Message);
+	RuntimeEventLog.Add(Entry);
+	if (RuntimeEventLog.Num() > 60)
+	{
+		RuntimeEventLog.RemoveAt(0, RuntimeEventLog.Num() - 60);
+	}
+	UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_RUNTIME_EVENT %s"), *Entry);
+}
+
+float UTownSimulationSubsystem::AddPlayerRapport(const FString& ResidentId, const float Delta)
+{
+	float& Rapport = PlayerRapport.FindOrAdd(ResidentId);
+	Rapport = FMath::Clamp(Rapport + Delta, 0.0f, 1.0f);
+	return Rapport;
+}
+
+bool UTownSimulationSubsystem::IsResidentInThreatAlert(const FString& ResidentId) const
+{
+	return bThreatAlertActive && ThreatAlertResidents.Contains(ResidentId);
+}
+
+void UTownSimulationSubsystem::ProcessThreatAlerts()
+{
+	if (LivingSpec.Threats.IsEmpty())
+	{
+		return;
+	}
+	const int32 Day = GetSimulationDay();
+	const int32 Minute = GetMinuteOfDay();
+	const bool bInAlertWindow = Minute >= 19 * 60 && Minute < 23 * 60;
+	// The central threat surfaces on alternating evenings, offset by the world seed,
+	// so it is a recurring pressure rather than a line of text in the brief.
+	const bool bAlertDay = Day >= 1 && ((Day + FMath::Abs(LivingSpec.Seed)) % 2) == 0;
+
+	if (bThreatAlertActive && (!bInAlertWindow || Day != LastThreatAlertDay))
+	{
+		bThreatAlertActive = false;
+		for (const FString& ResidentId : ThreatAlertResidents)
+		{
+			ReleaseResidentClaim(ResidentId);
+		}
+		const AWorldDirectorLocationActor* Refuge = FindLocation(ThreatAlertRefugeId);
+		RecordRuntimeEvent(FString::Printf(TEXT("The alarm passes. %d residents leave %s for home."),
+			ThreatAlertResidents.Num(), Refuge ? *Refuge->LocationId : *ThreatAlertRefugeId));
+		ThreatAlertResidents.Reset();
+		return;
+	}
+	if (bThreatAlertActive || !bAlertDay || !bInAlertWindow || LastThreatAlertDay == Day)
+	{
+		return;
+	}
+
+	const FThreat& Threat = LivingSpec.Threats[Day % LivingSpec.Threats.Num()];
+	const FWorldLocation* Refuge = LivingSpec.Locations.FindByPredicate(
+		[](const FWorldLocation& Location) { return Location.PurposeTag == TEXT("Purpose.Shelter"); });
+	if (Refuge == nullptr && LivingTown != nullptr)
+	{
+		Refuge = LivingSpec.Locations.FindByPredicate(
+			[this](const FWorldLocation& Location) { return Location.Id == LivingTown->LandmarkLocationId; });
+	}
+	if (Refuge == nullptr)
+	{
+		return;
+	}
+	ThreatAlertResidents.Reset();
+	for (const FResident& Resident : LivingSpec.Residents)
+	{
+		if (Threat.AffectedLocationIds.Contains(Resident.HomeLocationId) ||
+			Threat.AffectedLocationIds.Contains(Resident.WorkplaceLocationId))
+		{
+			ThreatAlertResidents.Add(Resident.Id);
+		}
+	}
+	if (ThreatAlertResidents.IsEmpty())
+	{
+		// The threat names no homes or workplaces; the most exposed household (the
+		// first one listed) still takes shelter so the alarm has visible consequence.
+		const FString& ExposedHome = LivingSpec.Residents.IsEmpty() ? FString() : LivingSpec.Residents[0].HomeLocationId;
+		for (const FResident& Resident : LivingSpec.Residents)
+		{
+			if (Resident.HomeLocationId == ExposedHome)
+			{
+				ThreatAlertResidents.Add(Resident.Id);
+			}
+		}
+	}
+	for (const FString& ResidentId : ThreatAlertResidents)
+	{
+		ReleaseResidentClaim(ResidentId);
+	}
+	bThreatAlertActive = true;
+	LastThreatAlertDay = Day;
+	ThreatAlertRefugeId = Refuge->Id;
+	++ThreatAlertCount;
+	RecordRuntimeEvent(FString::Printf(TEXT("Alarm: %s %d residents take refuge at %s."),
+		*Threat.Premise, ThreatAlertResidents.Num(), *Refuge->DisplayName));
 }
 
 void UTownSimulationSubsystem::ResolveSimulationState(const bool bTeleportActors)
@@ -433,9 +572,19 @@ void UTownSimulationSubsystem::ResolveResidentIntent(
 	{
 		SelectedStop = &Resident->Schedule.Last();
 	}
-	const FString IntendedLocation = SelectedStop ? SelectedStop->LocationId : ResidentSpec.HomeLocationId;
-	const FName Activity = Hour < 8 || Hour >= 21 ? FName(TEXT("Activity.Sleep"))
-		: Hour < 18 ? FName(TEXT("Activity.Work")) : FName(TEXT("Activity.Meet"));
+	FString IntendedLocation = SelectedStop ? SelectedStop->LocationId : ResidentSpec.HomeLocationId;
+	if (IsResidentInThreatAlert(State.ResidentId) && !ThreatAlertRefugeId.IsEmpty())
+	{
+		IntendedLocation = ThreatAlertRefugeId;
+	}
+	// Activity follows the destination, so occupation-specific schedules (night
+	// watch, early farmers, late merchants) claim the right stations.
+	const FName Activity = IntendedLocation == ResidentSpec.WorkplaceLocationId &&
+		IntendedLocation != ResidentSpec.HomeLocationId
+		? FName(TEXT("Activity.Work"))
+		: IntendedLocation == ResidentSpec.HomeLocationId
+			? FName(TEXT("Activity.Sleep"))
+			: FName(TEXT("Activity.Meet"));
 	if (State.IntendedLocationId != IntendedLocation || State.ActivityTag != Activity)
 	{
 		ReleaseResidentClaim(State.ResidentId);
@@ -521,13 +670,28 @@ void UTownSimulationSubsystem::ResolveResidentIntent(
 	{
 		Resident->SetActorLocation(Destination + FVector(0.0f, 0.0f, 95.0f), false, nullptr,
 			ETeleportType::TeleportPhysics);
+		ResidentMoveTargets.Remove(State.ResidentId);
 	}
 	else if (Distance > 120.0f)
 	{
 		if (AAIController* Controller = Cast<AAIController>(Resident->GetController()))
 		{
-			Controller->MoveToLocation(Destination, 90.0f, true, true, true, false);
+			// This runs every frame from the resident's StateTree. Re-issuing MoveTo each
+			// frame restarted path requests for every traveling resident; only issue one
+			// for a new destination or after the previous request ended.
+			const FVector* PreviousTarget = ResidentMoveTargets.Find(State.ResidentId);
+			const bool bNewDestination = PreviousTarget == nullptr ||
+				FVector::DistSquared2D(*PreviousTarget, Destination) > FMath::Square(50.0f);
+			if (bNewDestination || Controller->GetMoveStatus() == EPathFollowingStatus::Idle)
+			{
+				Controller->MoveToLocation(Destination, 90.0f, true, true, true, false);
+				ResidentMoveTargets.Add(State.ResidentId, Destination);
+			}
 		}
+	}
+	else
+	{
+		ResidentMoveTargets.Remove(State.ResidentId);
 	}
 	const bool bArrived = bTeleportActor || Distance <= 120.0f;
 	State.Availability = bArrived
@@ -653,14 +817,126 @@ void UTownSimulationSubsystem::ProcessRelationshipEvents()
 		const FWorldDirectorResidentRuntimeState* Target = ResidentStates.FindByPredicate(
 			[&Relationship](const FWorldDirectorResidentRuntimeState& State)
 			{ return State.ResidentId == Relationship.TargetResidentId; });
-		if (Source != nullptr && Target != nullptr &&
-			Source->CurrentLocationId == Target->CurrentLocationId)
+		if (Source == nullptr || Target == nullptr ||
+			Source->CurrentLocationId != Target->CurrentLocationId)
 		{
-			Relationship.Trust = FMath::Clamp(Relationship.Trust + 0.01f, 0.0f, 1.0f);
+			continue;
+		}
+		if (Relationship.RelationshipType == TEXT("Relationship.Rival"))
+		{
+			// Rivals forced together sour further unless a shared danger intervenes.
+			const bool bSheltering = IsResidentInThreatAlert(Relationship.SourceResidentId) &&
+				IsResidentInThreatAlert(Relationship.TargetResidentId);
+			Relationship.Trust = FMath::Clamp(Relationship.Trust + (bSheltering ? 0.03f : -0.02f), 0.0f, 1.0f);
+			Relationship.Fear = FMath::Clamp(Relationship.Fear + (bSheltering ? -0.02f : 0.02f), 0.0f, 1.0f);
+			if (bSheltering && Relationship.Trust >= 0.5f)
+			{
+				const FResident* SourceSpec = FindResidentSpec(Relationship.SourceResidentId);
+				const FResident* TargetSpec = FindResidentSpec(Relationship.TargetResidentId);
+				RecordRuntimeEvent(FString::Printf(TEXT("Sheltering together, %s and %s set their quarrel aside."),
+					SourceSpec ? *SourceSpec->DisplayName : *Relationship.SourceResidentId,
+					TargetSpec ? *TargetSpec->DisplayName : *Relationship.TargetResidentId));
+				Relationship.RelationshipType = TEXT("Relationship.CommunityTie");
+			}
+		}
+		else
+		{
+			const float Solidarity = IsResidentInThreatAlert(Relationship.SourceResidentId) ? 0.02f : 0.0f;
+			Relationship.Trust = FMath::Clamp(Relationship.Trust + 0.01f + Solidarity, 0.0f, 1.0f);
 			Relationship.Affinity = FMath::Clamp(Relationship.Affinity + 0.02f, 0.0f, 1.0f);
-			RelationshipEventCount++;
+		}
+		RelationshipEventCount++;
+	}
+}
+
+void UTownSimulationSubsystem::ApplyAtmosphere(const FWorldPresentation& Presentation)
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return;
+	}
+	UDirectionalLightComponent* Sun = nullptr;
+	for (TActorIterator<ADirectionalLight> It(World); It; ++It)
+	{
+		if (UDirectionalLightComponent* Light = Cast<UDirectionalLightComponent>(It->GetLightComponent());
+			Light != nullptr && Light->bAtmosphereSunLight)
+		{
+			Sun = Light;
+			break;
 		}
 	}
+	TActorIterator<ASkyLight> SkyIt(World);
+	USkyLightComponent* Sky = SkyIt ? SkyIt->GetLightComponent() : nullptr;
+	TActorIterator<AExponentialHeightFog> FogIt(World);
+	UExponentialHeightFogComponent* Fog = FogIt ? FogIt->GetComponent() : nullptr;
+	TActorIterator<APostProcessVolume> GradingIt(World);
+	APostProcessVolume* Grading = GradingIt ? *GradingIt : nullptr;
+	if (!bAtmosphereBaselineCaptured)
+	{
+		bAtmosphereBaselineCaptured = true;
+		BaselineSunIntensity = Sun ? Sun->Intensity : 0.0f;
+		BaselineSkyIntensity = Sky ? Sky->Intensity : 0.0f;
+		BaselineFogDensity = Fog ? Fog->FogDensity : 0.0f;
+		BaselineFogHeightFalloff = Fog ? Fog->FogHeightFalloff : 0.0f;
+		if (Grading != nullptr)
+		{
+			bBaselineOverrideSaturation = Grading->Settings.bOverride_ColorSaturation;
+			BaselineSaturation = Grading->Settings.ColorSaturation;
+			bBaselineOverrideGain = Grading->Settings.bOverride_ColorGain;
+			BaselineGain = Grading->Settings.ColorGain;
+		}
+	}
+	// Multipliers on the authored values: sun, sky, fog density, fog falloff,
+	// saturation, and a cool/dark colour gain.
+	float SunScale = 1.0f;
+	float SkyScale = 1.0f;
+	float FogScale = 1.0f;
+	float FalloffScale = 1.0f;
+	float Saturation = 1.0f;
+	FVector4 Gain(1.0, 1.0, 1.0, 1.0);
+	if (Presentation.Weather == TEXT("overcast"))
+	{
+		SunScale = 0.45f; SkyScale = 1.15f; FogScale = 1.8f; Saturation = 0.82f;
+		Gain = FVector4(0.96, 0.98, 1.03, 1.0);
+	}
+	else if (Presentation.Weather == TEXT("misty"))
+	{
+		SunScale = 0.7f; SkyScale = 1.1f; FogScale = 7.0f; FalloffScale = 0.45f; Saturation = 0.85f;
+		Gain = FVector4(0.97, 0.99, 1.02, 1.0);
+	}
+	else if (Presentation.Weather == TEXT("stormy"))
+	{
+		SunScale = 0.25f; SkyScale = 0.8f; FogScale = 3.0f; FalloffScale = 0.7f; Saturation = 0.65f;
+		Gain = FVector4(0.86, 0.9, 0.98, 1.0);
+	}
+	const bool bClear = Presentation.Weather == TEXT("clear");
+	if (Sun != nullptr)
+	{
+		Sun->SetIntensity(BaselineSunIntensity * SunScale);
+	}
+	if (Sky != nullptr)
+	{
+		Sky->SetIntensity(BaselineSkyIntensity * SkyScale);
+	}
+	if (Fog != nullptr)
+	{
+		// A map with no authored fog still needs some density for misty weather.
+		Fog->SetFogDensity(FMath::Max(BaselineFogDensity, bClear ? 0.0f : 0.004f) * (bClear ? 1.0f : FogScale));
+		Fog->SetFogHeightFalloff(BaselineFogHeightFalloff * FalloffScale);
+	}
+	if (Grading != nullptr)
+	{
+		Grading->Settings.bOverride_ColorSaturation = bClear ? bBaselineOverrideSaturation : true;
+		Grading->Settings.ColorSaturation = bClear ? BaselineSaturation
+			: FVector4(Saturation, Saturation, Saturation, 1.0) * BaselineSaturation;
+		Grading->Settings.bOverride_ColorGain = bClear ? bBaselineOverrideGain : true;
+		Grading->Settings.ColorGain = bClear ? BaselineGain : Gain * BaselineGain;
+	}
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_ATMOSPHERE weather=%s timeOfDay=%s sun=%.2f sky=%.2f fog=%.4f grading=%d"),
+		*Presentation.Weather, *Presentation.TimeOfDay, Sun ? Sun->Intensity : -1.0f, Sky ? Sky->Intensity : -1.0f,
+		Fog ? Fog->FogDensity : -1.0f, Grading != nullptr ? 1 : 0);
 }
 
 void UTownSimulationSubsystem::UpdateDayNightLighting() const
@@ -791,33 +1067,44 @@ void UTownSimulationSubsystem::ApplyRepurposeConsequences(
 	{
 		ReleaseResidentClaim(ResidentId);
 	}
-	RuntimeBeliefs.Reset();
 	for (const FResident& ResidentSpec : LivingSpec.Residents)
 	{
-		TArray<FBelief>& ResidentBeliefs = RuntimeBeliefs.Add(ResidentSpec.Id);
+		// Add beliefs the project created without discarding what residents have
+		// already learned from one another at runtime.
+		TArray<FBelief>& ResidentBeliefs = RuntimeBeliefs.FindOrAdd(ResidentSpec.Id);
 		for (const FString& BeliefId : ResidentSpec.BeliefIds)
 		{
-			if (const FBelief* Belief = LivingSpec.Beliefs.FindByPredicate(
-				[&BeliefId](const FBelief& Candidate) { return Candidate.Id == BeliefId; }))
+			const FBelief* Belief = LivingSpec.Beliefs.FindByPredicate(
+				[&BeliefId](const FBelief& Candidate) { return Candidate.Id == BeliefId; });
+			if (Belief != nullptr && !ResidentBeliefs.ContainsByPredicate(
+				[Belief](const FBelief& Existing) { return Existing.Id == Belief->Id; }))
 			{
 				ResidentBeliefs.Add(*Belief);
 			}
 		}
 		if (AWorldDirectorResidentActor* ResidentActor = FindResidentActor(ResidentSpec.Id))
 		{
-			const bool bProjectParticipant =
-				Project.RequiredParticipantResidentIds.Contains(ResidentSpec.Id);
 			ResidentActor->HomeLocationId = ResidentSpec.HomeLocationId;
 			ResidentActor->WorkplaceLocationId = ResidentSpec.WorkplaceLocationId;
-			ResidentActor->Schedule = {
-				{0, ResidentSpec.HomeLocationId},
-				{8, ResidentSpec.WorkplaceLocationId},
-				{18, bProjectParticipant ? Project.TargetLocationId :
-					LivingTown ? LivingTown->LandmarkLocationId : ResidentSpec.WorkplaceLocationId},
-				{21, ResidentSpec.HomeLocationId}
-			};
+			ResidentActor->Schedule = FWorldDirectorCompiler::BuildResidentSchedule(
+				ResidentSpec, LivingTown ? LivingTown->LandmarkLocationId : FString(), LivingSpec.Seed);
+			if (Project.RequiredParticipantResidentIds.Contains(ResidentSpec.Id))
+			{
+				// Participants spend their evenings at the converted building.
+				ResidentActor->Schedule.RemoveAll([](const FWorldDirectorScheduleStop& Stop)
+				{
+					return Stop.Hour >= 16 && Stop.Hour <= 20;
+				});
+				ResidentActor->Schedule.Add({18, Project.TargetLocationId});
+				ResidentActor->Schedule.Sort([](const FWorldDirectorScheduleStop& A, const FWorldDirectorScheduleStop& B)
+				{
+					return A.Hour < B.Hour;
+				});
+			}
 		}
 	}
+	RecordRuntimeEvent(FString::Printf(TEXT("%s now operates as %s."),
+		*Project.TargetLocationId, *Project.DesiredPurposeTag.ToString()));
 }
 
 bool UChangeProjectSubsystem::InitializeProjects(
@@ -827,6 +1114,9 @@ bool UChangeProjectSubsystem::InitializeProjects(
 {
 	Projects.Reset();
 	PreparationStartMinutes.Reset();
+	DelayedResumeStates.Reset();
+	DelayedSinceMinutes.Reset();
+	DelayedRetryCounts.Reset();
 	InspectionRecords.Reset();
 	RuntimeSpec = Spec;
 	RuntimeTown = Town;
@@ -848,6 +1138,9 @@ void UChangeProjectSubsystem::ShutdownProjects()
 {
 	Projects.Reset();
 	PreparationStartMinutes.Reset();
+	DelayedResumeStates.Reset();
+	DelayedSinceMinutes.Reset();
+	DelayedRetryCounts.Reset();
 	InspectionRecords.Reset();
 	RuntimeSpec = FGeneratedWorldSpec();
 	RuntimeTown = nullptr;
@@ -1191,10 +1484,43 @@ bool UChangeProjectSubsystem::ApplyActiveTransition(
 	return true;
 }
 
+void UChangeProjectSubsystem::DelayProject(
+	FChangeProject& Project,
+	const EWorldDirectorProjectState ResumeState,
+	const int64 ElapsedSimulationMinutes)
+{
+	DelayedResumeStates.Add(Project.Id, ResumeState);
+	DelayedSinceMinutes.Add(Project.Id, ElapsedSimulationMinutes);
+	DelayedRetryCounts.FindOrAdd(Project.Id)++;
+	SetProjectState(Project, EWorldDirectorProjectState::Delayed);
+}
+
 void UChangeProjectSubsystem::AdvanceProjects(const int64 ElapsedSimulationMinutes)
 {
+	// Delayed means "not yet", never "never": retry every half hour of simulated time
+	// for up to two simulated days, then fail with the last reason on record.
+	constexpr int64 DelayRetryIntervalMinutes = 30;
+	constexpr int32 MaximumDelayRetries = 96;
 	for (FChangeProject& Project : Projects)
 	{
+		if (Project.State == EWorldDirectorProjectState::Delayed)
+		{
+			const int64 DelayedSince = DelayedSinceMinutes.FindRef(Project.Id);
+			if (ElapsedSimulationMinutes - DelayedSince < DelayRetryIntervalMinutes)
+			{
+				continue;
+			}
+			if (DelayedRetryCounts.FindRef(Project.Id) >= MaximumDelayRetries)
+			{
+				UE_LOG(LogWorldDirector, Warning,
+					TEXT("WORLD_DIRECTOR_PROJECT_DECISION project=%s code=project.delay_exhausted message=Delayed for %d retries."),
+					*Project.Id, MaximumDelayRetries);
+				SetProjectState(Project, EWorldDirectorProjectState::Failed);
+				continue;
+			}
+			const EWorldDirectorProjectState* ResumeState = DelayedResumeStates.Find(Project.Id);
+			SetProjectState(Project, ResumeState ? *ResumeState : EWorldDirectorProjectState::Proposed);
+		}
 		if (Project.State == EWorldDirectorProjectState::Proposed)
 		{
 			FValidationReport Report;
@@ -1219,8 +1545,15 @@ void UChangeProjectSubsystem::AdvanceProjects(const int64 ElapsedSimulationMinut
 						return Issue.Code == TEXT("project.permission_refused") ||
 							Issue.Code == TEXT("project.conversion_unsupported");
 					});
-				SetProjectState(Project, bTemporary ? EWorldDirectorProjectState::Delayed :
-					bRefused ? EWorldDirectorProjectState::Refused : EWorldDirectorProjectState::Failed);
+				if (bTemporary)
+				{
+					DelayProject(Project, EWorldDirectorProjectState::Proposed, ElapsedSimulationMinutes);
+				}
+				else
+				{
+					SetProjectState(Project, bRefused
+						? EWorldDirectorProjectState::Refused : EWorldDirectorProjectState::Failed);
+				}
 				continue;
 			}
 			SetProjectState(Project, EWorldDirectorProjectState::Validated);
@@ -1230,9 +1563,10 @@ void UChangeProjectSubsystem::AdvanceProjects(const int64 ElapsedSimulationMinut
 		if (Project.State == EWorldDirectorProjectState::Scheduled &&
 			ElapsedSimulationMinutes >= Project.IntendedStartMinute)
 		{
-			const int32 IntendedHour = static_cast<int32>(
-				(Project.IntendedStartMinute % 1440) / 60);
-			const bool bParticipantUnavailable = IntendedHour < 8 || IntendedHour >= 21 ||
+			// Availability depends on the hour the project actually starts, not the
+			// hour it was planned for; a planned hour after 21:00 used to block forever.
+			const int32 CurrentHour = static_cast<int32>((ElapsedSimulationMinutes % 1440) / 60);
+			const bool bParticipantUnavailable = CurrentHour < 8 || CurrentHour >= 22 ||
 				Project.RequiredParticipantResidentIds.ContainsByPredicate(
 					[this](const FString& ParticipantId)
 					{
@@ -1244,7 +1578,7 @@ void UChangeProjectSubsystem::AdvanceProjects(const int64 ElapsedSimulationMinut
 					});
 			if (bParticipantUnavailable)
 			{
-				SetProjectState(Project, EWorldDirectorProjectState::Delayed);
+				DelayProject(Project, EWorldDirectorProjectState::Scheduled, ElapsedSimulationMinutes);
 				continue;
 			}
 			PreparationStartMinutes.Add(Project.Id, Project.IntendedStartMinute);
@@ -1269,7 +1603,7 @@ void UChangeProjectSubsystem::AdvanceProjects(const int64 ElapsedSimulationMinut
 			FVector::Dist2D(GetWorld()->GetFirstPlayerController()->GetPawn()->GetActorLocation(),
 				TargetActor->GetActorLocation()) < 1500.0f)
 		{
-			SetProjectState(Project, EWorldDirectorProjectState::Delayed);
+			DelayProject(Project, EWorldDirectorProjectState::Preparation, ElapsedSimulationMinutes);
 			continue;
 		}
 		const UTownSimulationSubsystem* Simulation = GetWorld()->GetSubsystem<UTownSimulationSubsystem>();
@@ -1282,7 +1616,7 @@ void UChangeProjectSubsystem::AdvanceProjects(const int64 ElapsedSimulationMinut
 				});
 		if (bBlockedByOccupant)
 		{
-			SetProjectState(Project, EWorldDirectorProjectState::Delayed);
+			DelayProject(Project, EWorldDirectorProjectState::Preparation, ElapsedSimulationMinutes);
 			continue;
 		}
 		SetProjectState(Project, EWorldDirectorProjectState::Transition);
@@ -1598,9 +1932,20 @@ void UDirectorBridgeSubsystem::HandleWorldCleanup(
 		{
 			DirectorProvider->CancelAll();
 		}
+		GenerationFinishedElapsedSeconds = FPlatformTime::Seconds() - GenerationStartedAtSeconds;
 		bGenerationRunning = false;
 		GenerationStage = EWorldDirectorGenerationStage::Cancelled;
 		LastGenerationError = TEXT("Generation cancelled during world teardown.");
+		if (GenerationMetrics.IsValidIndex(CurrentMetricIndex))
+		{
+			FWorldDirectorGenerationStageMetric& Metric = GenerationMetrics[CurrentMetricIndex];
+			Metric.DurationSeconds = FPlatformTime::Seconds() - CurrentStageStartedAtSeconds;
+			Metric.Error = LastGenerationError;
+		}
+		// Without this, a run interrupted by stopping PIE or changing level left
+		// per-stage artifacts but no run-summary.json explaining what happened.
+		RecordGenerationLog(LastGenerationError);
+		SaveRunSummary();
 		OnGenerationFinished.Clear();
 	}
 }
@@ -1621,13 +1966,21 @@ bool UDirectorBridgeSubsystem::BeginWorldGeneration(
 	GenerationPlayerPrompt = PlayerPrompt;
 	GenerationModel = bUseFixtureProviderForTesting
 		? TEXT("deterministic fixture")
-		: (Model.TrimStartAndEnd().IsEmpty() ? TEXT("gpt-5.6-luna") : Model.TrimStartAndEnd());
+		: (Model.TrimStartAndEnd().IsEmpty() ? GetWorldDirectorDefaultModel() : Model.TrimStartAndEnd());
 	GenerationReasoningEffort = bUseFixtureProviderForTesting
 		? TEXT("n/a")
 		: (ReasoningEffort.TrimStartAndEnd().IsEmpty()
-			? TEXT("high") : ReasoningEffort.TrimStartAndEnd().ToLower());
+			? GetWorldDirectorDefaultReasoningEffort(GenerationModel)
+			: ReasoningEffort.TrimStartAndEnd().ToLower());
 	GenerationSeed = Seed;
 	GenerationStageTimeoutSeconds = FMath::Max(1.0f, StageTimeoutSeconds);
+	// Two model stages plus local stages must fit one bounded wait. Each stage's
+	// timeout is capped by what remains, so retries cannot stretch a run indefinitely.
+	GenerationRunBudgetSeconds = bUseFixtureProviderForTesting
+		? GenerationStageTimeoutSeconds * 6.0f
+		: FMath::Max(GenerationStageTimeoutSeconds, 600.0f);
+	Playability = FWorldDirectorPlayabilityRecord();
+	ActiveStageProviderMode.Reset();
 	bFixtureProviderForTesting = bUseFixtureProviderForTesting;
 	RepairAttempt = 0;
 	ConsecutiveRepairIssueCount = 0;
@@ -1760,6 +2113,17 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 		? TEXT("fixture")
 		: (StageName == TEXT("population") || bPopulationBundleRepair
 			? TEXT("synthesized") : TEXT("cli"));
+	ActiveStageProviderMode = StageProviderMode;
+	const double RemainingRunSeconds = GenerationRunBudgetSeconds - GetGenerationElapsedSeconds();
+	if (RemainingRunSeconds < 5.0)
+	{
+		FinishGeneration(false, FString::Printf(
+			TEXT("Generation exceeded its %.0f second total time budget before stage '%s'."),
+			GenerationRunBudgetSeconds, *StageName));
+		return;
+	}
+	const float StageTimeoutSeconds = static_cast<float>(
+		FMath::Min(static_cast<double>(GenerationStageTimeoutSeconds), RemainingRunSeconds));
 	const int32 Ordinal = StageFileOrdinal();
 	ActiveGenerationRequestId = FString::Printf(
 		TEXT("%s-%02d-%llu-%s"),
@@ -1888,7 +2252,11 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 				}
 				else
 				{
+					// Whole-section targets ($.locations, $.facts, ...) must carry the
+					// current array; without it the model regenerated the section blind
+					// and every cross-reference to the old IDs broke.
 					CopyCurrentObject(*Section);
+					CopyCurrentArray(*Section);
 				}
 			}
 		}
@@ -2007,6 +2375,14 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	CapabilitySummary->SetNumberField(TEXT("certifiedPlotMinimum"), 12);
 	CapabilitySummary->SetNumberField(TEXT("certifiedPlotMaximum"), 18);
 	CapabilitySummary->SetNumberField(TEXT("homePlotMaximum"), 6);
+	// What the pack can build, so the model aims its choices at operations that exist.
+	const TSharedRef<FJsonObject> Buildable = MakeShared<FJsonObject>();
+	Buildable->SetObjectField(TEXT("presentation"), FWorldDirectorPresentation::BuildManifest());
+	Buildable->SetArrayField(TEXT("buildings"), FWorldDirectorCompiler::BuildBuildingManifest());
+	Buildable->SetStringField(TEXT("notAvailable"),
+		TEXT("Stone castles, temples, ruins, lighthouses, large docks, snow, desert, animals, "
+			"and any tree but one village species. Keep these in prose."));
+	CapabilitySummary->SetObjectField(TEXT("buildable"), Buildable);
 	Request->SetObjectField(TEXT("capabilitySummary"), CapabilitySummary);
 
 	// The provider is intentionally stateless between stages. Retain the decisions
@@ -2140,7 +2516,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	}
 	Request->SetNumberField(
 		TEXT("companionTimeoutSeconds"),
-		FMath::Max(1.0, static_cast<double>(GenerationStageTimeoutSeconds) - 5.0));
+		FMath::Max(1.0, static_cast<double>(StageTimeoutSeconds) - 5.0));
 
 	if (!SaveJsonObject(Request, RequestPath))
 	{
@@ -2180,8 +2556,9 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	Metric.RequestBytes = RequestBytes;
 	CurrentMetricIndex = GenerationMetrics.Num() - 1;
 	CurrentStageStartedAtSeconds = FPlatformTime::Seconds();
-	RecordGenerationLog(FString::Printf(TEXT("Stage %s requested; requestBytes=%lld timeout=%.1fs"),
-		*StageName, Metric.RequestBytes, GenerationStageTimeoutSeconds));
+	RecordGenerationLog(FString::Printf(
+		TEXT("Stage %s requested; mode=%s requestBytes=%lld timeout=%.1fs runBudgetRemaining=%.0fs"),
+		*StageName, *StageProviderMode, Metric.RequestBytes, StageTimeoutSeconds, RemainingRunSeconds));
 
 	const TWeakObjectPtr<UDirectorBridgeSubsystem> WeakThis(this);
 	const FString ConfiguredPython =
@@ -2193,7 +2570,7 @@ void UDirectorBridgeSubsystem::RequestCurrentStage()
 	const EWorldDirectorGenerationStage ExpectedStage = GenerationStage;
 	DirectorProvider->RequestStage(
 		CompanionExecutable, CompanionScript, RequestPath, ResponsePath,
-		GenerationStageTimeoutSeconds,
+		StageTimeoutSeconds,
 		[WeakThis, ExpectedRunId, ExpectedRequestId, ExpectedStage](FWorldDirectorProviderResponse&& Response)
 		{
 			if (WeakThis.IsValid())
@@ -2259,11 +2636,16 @@ void UDirectorBridgeSubsystem::HandleStageResponse(
 			Metric.PromptCharacters = static_cast<int64>(Number);
 		}
 	};
+	// The 64 KB cap bounds what a model may return. Locally synthesized population
+	// bundles are not provider output and legitimately run larger for 30 residents.
+	const int64 ResponseByteLimit = ActiveStageProviderMode == TEXT("cli") ? 64000 : 512000;
 	if (Response.bSuccess &&
-		FTCHARToUTF8(*Response.ResponseJson).Length() > 64000)
+		FTCHARToUTF8(*Response.ResponseJson).Length() > ResponseByteLimit)
 	{
 		Response.bSuccess = false;
-		Response.Error = TEXT("Companion response exceeded the 64000-byte local CLI budget.");
+		Response.Error = FString::Printf(
+			TEXT("Companion response exceeded the %lld-byte budget for %s stages."),
+			ResponseByteLimit, *ActiveStageProviderMode);
 	}
 	const int32 CompletedMetricIndex = CurrentMetricIndex;
 	if (GenerationMetrics.IsValidIndex(CompletedMetricIndex))
@@ -2390,7 +2772,9 @@ bool UDirectorBridgeSubsystem::BuildValidLayoutCandidates(FString& OutError)
 
 	LayoutCandidates.Reset();
 	TSet<FString> PhysicalFingerprints;
-	for (int32 Offset = 0; Offset < 12 && LayoutCandidates.Num() < 4; ++Offset)
+	// Each candidate is a full synchronous physical generation on the game thread.
+	// Two valid, distinct layouts are all selection needs; more only lengthened the hitch.
+	for (int32 Offset = 0; Offset < 12 && LayoutCandidates.Num() < 2; ++Offset)
 	{
 		const int64 CandidateSeed = static_cast<int64>(GenerationSeed) + Offset;
 		if (CandidateSeed > MAX_int32)
@@ -2618,6 +3002,18 @@ bool UDirectorBridgeSubsystem::IntegrateAndValidate()
 		return false;
 	}
 	LastResolvedWorldPlan = Resolved;
+	{
+		TMap<FName, int32> Outcomes;
+		for (const FWorldDirectorExpressionEntry& Entry : Resolved.Expression)
+		{
+			++Outcomes.FindOrAdd(Entry.Outcome);
+			UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_EXPRESSION_ENTRY outcome=%s field=%s value=%s detail=%s"),
+				*Entry.Outcome.ToString(), *Entry.Field, *Entry.Value, *Entry.Detail);
+		}
+		UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_EXPRESSION applied=%d defaulted=%d notApplicable=%d textOnly=%d"),
+			Outcomes.FindRef(TEXT("Applied")), Outcomes.FindRef(TEXT("Defaulted")),
+			Outcomes.FindRef(TEXT("NotApplicable")), Outcomes.FindRef(TEXT("TextOnly")));
+	}
 
 	FString AcceptedJson;
 	FValidationReport SerializationReport;
@@ -2947,6 +3343,20 @@ void UDirectorBridgeSubsystem::RecordRuntimeCompilationMetric(
 	SaveRunSummary();
 }
 
+void UDirectorBridgeSubsystem::RecordPlayability(const FWorldDirectorPlayabilityRecord& Record)
+{
+	Playability = Record;
+	Playability.bRecorded = true;
+	RecordGenerationLog(FString::Printf(
+		TEXT("Playability recorded; navigationBuilt=%s waited=%.1fs viable=%s issues=%d terrain=%s project=%s"),
+		Playability.bNavigationBuilt ? TEXT("true") : TEXT("false"), Playability.NavigationWaitSeconds,
+		Playability.bNavigationViable ? TEXT("true") : TEXT("false"), Playability.NavigationIssues.Num(),
+		*Playability.TerrainArchetype, *Playability.ProjectState));
+	UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_PLAYABILITY_RESULT=%s run=%s"),
+		Playability.bNavigationViable ? TEXT("PASS") : TEXT("FAIL"), *GenerationRunId);
+	SaveRunSummary();
+}
+
 FString UDirectorBridgeSubsystem::BuildGenerationDiagnosticReport() const
 {
 	int64 TotalInputTokens = 0;
@@ -3056,13 +3466,34 @@ void UDirectorBridgeSubsystem::SaveRunSummary() const
 		StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(static_cast<int64>(GenerationStage)));
 	const FString Outcome = RuntimeCompileState == TEXT("Failed")
 		? TEXT("FailedRuntimeCompile")
-		: RuntimeCompileState == TEXT("Succeeded")
-			? TEXT("Completed")
-			: GenerationStage == EWorldDirectorGenerationStage::Completed
-				? TEXT("CompletedSemanticOnly")
-				: StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(
-					static_cast<int64>(GenerationStage));
+		: Playability.bRecorded
+			? (Playability.bNavigationViable ? TEXT("Playable") : TEXT("NotPlayable"))
+			: RuntimeCompileState == TEXT("Succeeded")
+				? TEXT("CompiledPlayabilityPending")
+				: GenerationStage == EWorldDirectorGenerationStage::Completed
+					? TEXT("CompletedSemanticOnly")
+					: StaticEnum<EWorldDirectorGenerationStage>()->GetNameStringByValue(
+						static_cast<int64>(GenerationStage));
 	Summary->SetStringField(TEXT("outcome"), Outcome);
+	Summary->SetNumberField(TEXT("runBudgetSeconds"), GenerationRunBudgetSeconds);
+	if (Playability.bRecorded)
+	{
+		const TSharedRef<FJsonObject> PlayabilityObject = MakeShared<FJsonObject>();
+		PlayabilityObject->SetBoolField(TEXT("navigationBuilt"), Playability.bNavigationBuilt);
+		PlayabilityObject->SetNumberField(TEXT("navigationWaitSeconds"), Playability.NavigationWaitSeconds);
+		PlayabilityObject->SetBoolField(TEXT("navigationViable"), Playability.bNavigationViable);
+		TArray<TSharedPtr<FJsonValue>> Issues;
+		for (const FString& Issue : Playability.NavigationIssues)
+		{
+			Issues.Add(MakeShared<FJsonValueString>(Issue));
+		}
+		PlayabilityObject->SetArrayField(TEXT("navigationIssues"), Issues);
+		PlayabilityObject->SetNumberField(TEXT("spawnedLocations"), Playability.SpawnedLocations);
+		PlayabilityObject->SetNumberField(TEXT("spawnedResidents"), Playability.SpawnedResidents);
+		PlayabilityObject->SetStringField(TEXT("terrainArchetype"), Playability.TerrainArchetype);
+		PlayabilityObject->SetStringField(TEXT("projectState"), Playability.ProjectState);
+		Summary->SetObjectField(TEXT("playability"), PlayabilityObject);
+	}
 	Summary->SetStringField(TEXT("runtimeCompileState"), RuntimeCompileState);
 	Summary->SetStringField(TEXT("runtimeCompileError"), RuntimeCompileError);
 	Summary->SetNumberField(TEXT("seed"), GenerationSeed);
@@ -3074,6 +3505,28 @@ void UDirectorBridgeSubsystem::SaveRunSummary() const
 	Summary->SetStringField(TEXT("terrainFingerprint"), LastResolvedWorldPlan.Terrain.HeightFingerprint);
 	Summary->SetStringField(TEXT("surfaceFingerprint"), LastResolvedWorldPlan.Terrain.SurfaceFingerprint);
 	Summary->SetStringField(TEXT("layoutFingerprint"), LastResolvedWorldPlan.LayoutFingerprint);
+	// What each model-authored value did to the world, so misses show up per run.
+	{
+		const TSharedRef<FJsonObject> Expression = MakeShared<FJsonObject>();
+		TMap<FName, int32> Outcomes;
+		TArray<TSharedPtr<FJsonValue>> Entries;
+		for (const FWorldDirectorExpressionEntry& Entry : LastResolvedWorldPlan.Expression)
+		{
+			++Outcomes.FindOrAdd(Entry.Outcome);
+			const TSharedRef<FJsonObject> EntryObject = MakeShared<FJsonObject>();
+			EntryObject->SetStringField(TEXT("field"), Entry.Field);
+			EntryObject->SetStringField(TEXT("value"), Entry.Value);
+			EntryObject->SetStringField(TEXT("outcome"), Entry.Outcome.ToString());
+			EntryObject->SetStringField(TEXT("detail"), Entry.Detail);
+			Entries.Add(MakeShared<FJsonValueObject>(EntryObject));
+		}
+		for (const TCHAR* OutcomeName : {TEXT("Applied"), TEXT("Defaulted"), TEXT("NotApplicable"), TEXT("TextOnly")})
+		{
+			Expression->SetNumberField(OutcomeName, Outcomes.FindRef(OutcomeName));
+		}
+		Expression->SetArrayField(TEXT("entries"), Entries);
+		Summary->SetObjectField(TEXT("expression"), Expression);
+	}
 	Summary->SetNumberField(TEXT("rootSeed"), GenerationSeed);
 	Summary->SetNumberField(TEXT("selectedLayoutSeed"), LastResolvedWorldPlan.Seed);
 	Summary->SetStringField(TEXT("selectedCandidateId"), SelectedLayoutCandidateId);

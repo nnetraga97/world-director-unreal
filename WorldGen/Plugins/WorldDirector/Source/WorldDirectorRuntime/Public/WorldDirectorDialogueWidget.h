@@ -40,5 +40,4 @@ private:
 	TObjectPtr<class AWorldDirectorResidentActor> Resident;
 
 	FString ResidentId;
-	FString KnownFactSummary;
 };

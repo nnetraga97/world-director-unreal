@@ -39,6 +39,7 @@ struct WORLDDIRECTORRUNTIME_API FWorldDirectorResidentRuntimeState
 	int32 SmartObjectWaits = 0;
 };
 
+
 UCLASS()
 class WORLDDIRECTORRUNTIME_API UCapabilityCatalogSubsystem : public UGameInstanceSubsystem
 {
@@ -184,6 +185,27 @@ public:
 		return RuntimeBeliefs.Find(ResidentId);
 	}
 
+	/** True while dynamic navigation for the compiled town is still being generated. */
+	UFUNCTION(BlueprintPure, Category = "World Director|Simulation")
+	bool IsWaitingForNavigation() const { return bWaitingForNavigation; }
+
+	UFUNCTION(BlueprintPure, Category = "World Director|Simulation")
+	bool IsThreatAlertActive() const { return bThreatAlertActive; }
+
+	UFUNCTION(BlueprintPure, Category = "World Director|Simulation")
+	int32 GetThreatAlertCount() const { return ThreatAlertCount; }
+
+	/** Human-readable record of what happened in the running town, newest last. */
+	UFUNCTION(BlueprintPure, Category = "World Director|Simulation")
+	const TArray<FString>& GetRuntimeEventLog() const { return RuntimeEventLog; }
+
+	/** How far a resident trusts the player (0-1); helping them raises it and unlocks secrets. */
+	UFUNCTION(BlueprintPure, Category = "World Director|Simulation")
+	float GetPlayerRapport(const FString& ResidentId) const { return PlayerRapport.FindRef(ResidentId); }
+
+	UFUNCTION(BlueprintCallable, Category = "World Director|Simulation")
+	float AddPlayerRapport(const FString& ResidentId, float Delta);
+
 	/** Invoked by the resident's StateTree task; returns false when no living-town state exists. */
 	bool TickResidentLife(class AWorldDirectorResidentActor& Resident, float DeltaTime);
 
@@ -199,7 +221,12 @@ private:
 	void ReleaseResidentClaim(const FString& ResidentId);
 	void ProcessBeliefSharing();
 	void ProcessRelationshipEvents();
+	void ProcessThreatAlerts();
+	void RecordRuntimeEvent(const FString& Message);
+	bool IsResidentInThreatAlert(const FString& ResidentId) const;
 	void UpdateDayNightLighting() const;
+	/** Weather from brief.presentation, applied relative to the map's own fog, light and grading. */
+	void ApplyAtmosphere(const FWorldPresentation& Presentation);
 	class AWorldDirectorLocationActor* FindLocation(const FString& LocationId) const;
 	class AWorldDirectorResidentActor* FindResidentActor(const FString& ResidentId) const;
 	const FResident* FindResidentSpec(const FString& ResidentId) const;
@@ -210,6 +237,18 @@ private:
 
 	UPROPERTY()
 	int64 ElapsedSimulationMinutes = 0;
+
+	// The map's authored atmosphere, captured before the first weather change so every
+	// later town scales from it and clear weather restores it exactly.
+	bool bAtmosphereBaselineCaptured = false;
+	float BaselineSunIntensity = 0.0f;
+	float BaselineSkyIntensity = 0.0f;
+	float BaselineFogDensity = 0.0f;
+	float BaselineFogHeightFalloff = 0.0f;
+	bool bBaselineOverrideSaturation = false;
+	FVector4 BaselineSaturation = FVector4(1.0, 1.0, 1.0, 1.0);
+	bool bBaselineOverrideGain = false;
+	FVector4 BaselineGain = FVector4(1.0, 1.0, 1.0, 1.0);
 
 	UPROPERTY(EditAnywhere, Category = "World Director|Simulation")
 	float MinutesPerRealSecond = 4.0f;
@@ -228,12 +267,21 @@ private:
 
 	TMap<FString, FSmartObjectClaimHandle> ResidentClaims;
 	TMap<FString, FVector> ResidentClaimLocations;
+	TMap<FString, FVector> ResidentMoveTargets;
 	TMap<FString, TArray<FBelief>> RuntimeBeliefs;
 	TSet<FString> ClosedFactIds;
 	int32 LastBeliefSharingMinute = INDEX_NONE;
 	int32 LastRelationshipEventDay = INDEX_NONE;
 	int32 SharedBeliefCount = 0;
 	int32 RelationshipEventCount = 0;
+	bool bWaitingForNavigation = false;
+	bool bThreatAlertActive = false;
+	int32 LastThreatAlertDay = INDEX_NONE;
+	int32 ThreatAlertCount = 0;
+	FString ThreatAlertRefugeId;
+	TSet<FString> ThreatAlertResidents;
+	TArray<FString> RuntimeEventLog;
+	TMap<FString, float> PlayerRapport;
 };
 
 USTRUCT(BlueprintType)
@@ -308,6 +356,12 @@ private:
 	TArray<FWorldDirectorProjectInspectionRecord> InspectionRecords;
 
 	TMap<FString, int64> PreparationStartMinutes;
+
+	/** Delayed is temporary: each delayed project resumes from this state after a backoff. */
+	TMap<FString, EWorldDirectorProjectState> DelayedResumeStates;
+	TMap<FString, int64> DelayedSinceMinutes;
+	TMap<FString, int32> DelayedRetryCounts;
+	void DelayProject(FChangeProject& Project, EWorldDirectorProjectState ResumeState, int64 ElapsedSimulationMinutes);
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
@@ -367,10 +421,15 @@ public:
 	const TArray<FString>& GetGenerationLog() const { return GenerationLog; }
 	const FString& GetGenerationRunDirectory() const { return GenerationRunDirectory; }
 	double GetGenerationElapsedSeconds() const;
+	/** Total wall-clock budget for the whole run; every stage timeout is capped by what remains. */
+	double GetGenerationRunBudgetSeconds() const { return GenerationRunBudgetSeconds; }
 	FString BuildGenerationDiagnosticReport() const;
 	void RecordRuntimeCompilationMetric(
 		bool bSuccess, double DurationSeconds, int32 LocationCount, int32 ResidentCount,
 		const FString& Error);
+	/** Records post-compile playability into the run summary; generation "Completed" alone is not playable. */
+	void RecordPlayability(const FWorldDirectorPlayabilityRecord& Record);
+	const FWorldDirectorPlayabilityRecord& GetPlayability() const { return Playability; }
 
 	UFUNCTION(BlueprintPure, Category = "World Director|Generation")
 	int32 GetGenerationRepairAttempts() const { return RepairAttempt; }
@@ -438,6 +497,15 @@ private:
 
 	UPROPERTY()
 	float GenerationStageTimeoutSeconds = 300.0f;
+
+	UPROPERTY()
+	float GenerationRunBudgetSeconds = 600.0f;
+
+	UPROPERTY()
+	FString ActiveStageProviderMode;
+
+	UPROPERTY()
+	FWorldDirectorPlayabilityRecord Playability;
 
 	UPROPERTY()
 	int32 RepairAttempt = 0;

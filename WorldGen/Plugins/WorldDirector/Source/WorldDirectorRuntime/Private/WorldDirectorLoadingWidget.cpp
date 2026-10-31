@@ -197,9 +197,9 @@ void UWorldDirectorLoadingWidget::RefreshLoadingState()
 	}
 	TitleText->SetText(FText::FromString(TEXT("BUILDING YOUR WORLD")));
 	StageText->SetText(FText::FromString(Label));
-	DetailText->SetText(FText::FromString(FString::Printf(TEXT("Run %s  |  %.1f seconds elapsed"),
+	DetailText->SetText(FText::FromString(FString::Printf(TEXT("Run %s  |  %.0f of at most %.0f seconds"),
 		Bridge->GetGenerationRunId().IsEmpty() ? TEXT("starting") : *Bridge->GetGenerationRunId(),
-		Bridge->GetGenerationElapsedSeconds())));
+		Bridge->GetGenerationElapsedSeconds(), Bridge->GetGenerationRunBudgetSeconds())));
 	ProgressBar->SetPercent(Progress);
 	ProgressBar->SetFillColorAndOpacity(WorldDirectorLoadingWidgetPrivate::AccentBlue);
 }

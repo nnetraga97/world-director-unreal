@@ -12,6 +12,8 @@
       "The river road sustains the settlement.",
       "A recent fever makes spare beds politically important."
     ],
+    "landform": "basin",
+    "presentation": {"fortification": "open", "waterLife": "none", "justice": "lenient", "fire": "hearths", "timeOfDay": "dawn", "weather": "clear", "season": "summer", "roofPalette": "natural", "authorityColor": "natural"},
     "terrainPreferences": ["Flat river basin", "Elevated civic shelf"],
     "requiredCapabilityTags": [
       "Capability.Interior",

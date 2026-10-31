@@ -1,5 +1,7 @@
 #include "WorldDirectorCompiler.h"
 #include "WorldDirectorRuntime.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 
 #include "Engine/World.h"
 #include "Math/RandomStream.h"
@@ -34,7 +36,13 @@ const FBuildingCapability BuildingCapabilities[] = {
 	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Home_Tall_02.BP_Cap_Home_Tall_02_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Home_Compact_01.BP_Interior_Home_Compact_01_C"), FVector2D(1410.0, 1928.0), false, false},
 	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_Longhouse_01.BP_Cap_Workplace_Longhouse_01_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Workplace_Longhouse_01.BP_Interior_Workplace_Longhouse_01_C"), FVector2D(1330.0, 1783.0), true, false},
 	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_Inn_01.BP_Cap_Workplace_Inn_01_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Home_Small_01.BP_Interior_Home_Small_01_C"), FVector2D(722.0, 912.0), true, false},
-	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_Guildhall_01.BP_Cap_Workplace_Guildhall_01_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Workplace_Longhouse_01.BP_Interior_Workplace_Longhouse_01_C"), FVector2D(1238.0, 1633.0), true, true}
+	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_Guildhall_01.BP_Cap_Workplace_Guildhall_01_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Workplace_Longhouse_01.BP_Interior_Workplace_Longhouse_01_C"), FVector2D(1238.0, 1633.0), true, true},
+	// Purpose-specific public shells (FVP houses 13, 14, 11, 12). Each has its front
+	// door on the local -Y face, where the compiler places the certified entrance.
+	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_Watermill_01.BP_Cap_Workplace_Watermill_01_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Home_Small_01.BP_Interior_Home_Small_01_C"), FVector2D(1084.0, 912.0), true, false},
+	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_Windmill_01.BP_Cap_Workplace_Windmill_01_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Home_Compact_01.BP_Interior_Home_Compact_01_C"), FVector2D(1707.0, 962.0), true, false},
+	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_CivicHall_01.BP_Cap_Workplace_CivicHall_01_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Workplace_Longhouse_01.BP_Interior_Workplace_Longhouse_01_C"), FVector2D(1581.0, 1510.0), true, false},
+	{TEXT("/Game/CapabilityPack/Buildings/BP_Cap_Workplace_CivicHall_02.BP_Cap_Workplace_CivicHall_02_C"), TEXT("/Game/CapabilityPack/Interiors/BP_Interior_Workplace_Longhouse_01.BP_Interior_Workplace_Longhouse_01_C"), FVector2D(1301.0, 1303.0), true, false}
 };
 
 enum class EBuildingCapabilityIndex : uint8
@@ -46,8 +54,35 @@ enum class EBuildingCapabilityIndex : uint8
 	HomeTallBroad = 4,
 	WorkplaceLonghouse = 5,
 	WorkplaceInn = 6,
-	WorkplaceGuildhall = 7
+	WorkplaceGuildhall = 7,
+	WorkplaceWatermill = 8,
+	WorkplaceWindmill = 9,
+	WorkplaceCivicHall = 10,
+	WorkplaceCivicHallBroad = 11
 };
+
+struct FShellUseCounts
+{
+	int32 Longhouse = 0;
+	int32 Inn = 0;
+	int32 Watermill = 0;
+	int32 Windmill = 0;
+	int32 CivicHall = 0;
+};
+
+bool IdentityContains(const FWorldLocation& Location, std::initializer_list<const TCHAR*> Words)
+{
+	FString Identity = Location.Id + TEXT("|") + Location.DisplayName;
+	Identity.ToLowerInline();
+	for (const TCHAR* Word : Words)
+	{
+		if (Identity.Contains(Word))
+		{
+			return true;
+		}
+	}
+	return false;
+}
 
 const int32 CertifiedHomeCapabilityIndices[] = {
 	static_cast<int32>(EBuildingCapabilityIndex::HomeCompact),
@@ -112,8 +147,9 @@ int32 CivicPavingPriority(const FWorldLocation& Location)
 	return INDEX_NONE;
 }
 
-bool PrefersInnShell(const FWorldLocation& Location, const int32 WorldSeed)
+bool PrefersInnShell(const FWorldLocation& Location, const int32 WorldSeed, bool& bOutChosenByName)
 {
+	bOutChosenByName = true;
 	if (Location.PurposeTag == TEXT("Purpose.Clinic") ||
 		Location.PurposeTag == TEXT("Purpose.Shelter"))
 	{
@@ -144,6 +180,7 @@ bool PrefersInnShell(const FWorldLocation& Location, const int32 WorldSeed)
 		return false;
 	}
 
+	bOutChosenByName = false;
 	const int32 LocationSeed = FWorldDirectorPhysicalGenerator::DeriveStageSeed(
 		WorldSeed, Location.Id + TEXT("|building-archetype"));
 	return (static_cast<uint32>(LocationSeed) & 1U) != 0;
@@ -154,29 +191,80 @@ const FBuildingCapability* ChooseCapability(
 	int32 HomeOrdinal,
 	bool bLandmark,
 	int32 WorldSeed,
-	int32& LonghouseUseCount,
-	int32& InnUseCount)
+	FShellUseCounts& Uses,
+	FWorldDirectorExpressionEntry& OutExpression)
 {
+	int32& LonghouseUseCount = Uses.Longhouse;
+	int32& InnUseCount = Uses.Inn;
+	OutExpression.Outcome = TEXT("Applied");
 	if (bLandmark)
 	{
 		// Reserve the civic-hall silhouette for the primary landmark. Keeping it out of
 		// every other selection pool makes the landmark readable from any approach.
+		OutExpression.Detail = TEXT("Guildhall: the town's landmark.");
 		return &BuildingCapabilities[static_cast<int32>(
 			EBuildingCapabilityIndex::WorkplaceGuildhall)];
 	}
 	if (IsWorkplace(Location))
 	{
-		// Respect semantic purpose on a tie, then rebalance the two certified public
-		// archetypes. This preserves a coherent hierarchy without allowing a longhouse
-		// monoculture when an AI spec contains many generic public locations.
-		bool bUseInn = PrefersInnShell(Location, WorldSeed);
-		if (LonghouseUseCount < InnUseCount)
+		// Buildings whose trade has a matching silhouette get it: a waterwheel mill, a
+		// windmill for grain, a large hall for councils and headquarters. Each is capped
+		// so the town keeps one recognizable mill rather than a row of them.
+		const bool bTradeWorkplace = Location.PurposeTag == TEXT("Purpose.Workplace");
+		if (bTradeWorkplace && Uses.Watermill < 1 && IdentityContains(Location,
+			{TEXT("mill"), TEXT("waterwheel"), TEXT("weir"), TEXT("sluice"), TEXT("watermill")}) &&
+			!IdentityContains(Location, {TEXT("windmill")}))
+		{
+			++Uses.Watermill;
+			OutExpression.Detail = TEXT("Watermill: the name has a mill word.");
+			return &BuildingCapabilities[static_cast<int32>(EBuildingCapabilityIndex::WorkplaceWatermill)];
+		}
+		if (bTradeWorkplace && Uses.Windmill < 1 && IdentityContains(Location,
+			{TEXT("windmill"), TEXT("granary"), TEXT("grain"), TEXT("flour"), TEXT("threshing")}))
+		{
+			++Uses.Windmill;
+			OutExpression.Detail = TEXT("Windmill: the name has a grain word.");
+			return &BuildingCapabilities[static_cast<int32>(EBuildingCapabilityIndex::WorkplaceWindmill)];
+		}
+		if (Uses.CivicHall < 2 && (Location.PurposeTag == TEXT("Purpose.Headquarters") ||
+			bTradeWorkplace && IdentityContains(Location, {TEXT("council"), TEXT("court"), TEXT("reeve"), TEXT("moot"),
+				TEXT("assembly"), TEXT("archive"), TEXT("town hall")})))
+		{
+			const EBuildingCapabilityIndex Hall = Uses.CivicHall == 0
+				? EBuildingCapabilityIndex::WorkplaceCivicHall : EBuildingCapabilityIndex::WorkplaceCivicHallBroad;
+			++Uses.CivicHall;
+			OutExpression.Detail = Location.PurposeTag == TEXT("Purpose.Headquarters")
+				? TEXT("Civic hall: the seat of authority.") : TEXT("Civic hall: the name has a council word.");
+			return &BuildingCapabilities[static_cast<int32>(Hall)];
+		}
+		// Respect the location's semantic role (market/ferry/shelter read as an inn,
+		// mill/granary/watch as a longhouse). Strict alternation used to override that
+		// for every other building; only rebalance once one shell clearly dominates.
+		bool bChosenByName = false;
+		bool bUseInn = PrefersInnShell(Location, WorldSeed, bChosenByName);
+		const bool bPreferredInn = bUseInn;
+		if (LonghouseUseCount >= InnUseCount + 3)
+		{
+			bUseInn = true;
+		}
+		else if (InnUseCount >= LonghouseUseCount + 3)
 		{
 			bUseInn = false;
 		}
-		else if (InnUseCount < LonghouseUseCount)
+		const TCHAR* Shell = bUseInn ? TEXT("Inn") : TEXT("Longhouse");
+		if (bUseInn != bPreferredInn)
 		{
-			bUseInn = true;
+			OutExpression.Outcome = TEXT("Defaulted");
+			OutExpression.Detail = FString::Printf(TEXT("%s: swapped to avoid repeating one shell."), Shell);
+		}
+		else if (!bChosenByName)
+		{
+			OutExpression.Outcome = TEXT("Defaulted");
+			OutExpression.Detail = FString::Printf(TEXT("%s: no building word in the name; seeded choice."), Shell);
+		}
+		else
+		{
+			OutExpression.Detail = FString::Printf(TEXT("%s: chosen by purpose or name."), Shell);
 		}
 		if (bUseInn)
 		{
@@ -188,6 +276,7 @@ const FBuildingCapability* ChooseCapability(
 		return &BuildingCapabilities[static_cast<int32>(
 			EBuildingCapabilityIndex::WorkplaceLonghouse)];
 	}
+	OutExpression.Detail = TEXT("Cottage: homes rotate through five cottage shapes.");
 	return &BuildingCapabilities[CertifiedHomeCapabilityIndices[
 		HomeOrdinal % UE_ARRAY_COUNT(CertifiedHomeCapabilityIndices)]];
 }
@@ -225,6 +314,29 @@ int32 PreferredCharacterFamily(const FName OccupationTag, const bool bFemale)
 	}
 	return 0;
 }
+}
+
+TArray<TSharedPtr<FJsonValue>> FWorldDirectorCompiler::BuildBuildingManifest()
+{
+	// Mirrors ChooseCapability so the model knows which names produce which building.
+	const TCHAR* Rows[][2] = {
+		{TEXT("Guildhall"), TEXT("the landmark (first landmarkLocationIds entry)")},
+		{TEXT("Watermill"), TEXT("one Purpose.Workplace named with mill, waterwheel, weir or sluice")},
+		{TEXT("Windmill"), TEXT("one Purpose.Workplace named with windmill, granary, grain, flour or threshing")},
+		{TEXT("Civic hall"), TEXT("up to two: Purpose.Headquarters, or a Purpose.Workplace named with council, court, reeve, moot, assembly, archive or town hall")},
+		{TEXT("Inn"), TEXT("Purpose.Clinic, Purpose.Shelter, or names with inn, market, ferry, healing, pilgrim or shelter")},
+		{TEXT("Longhouse"), TEXT("names with longhouse, granary, watch or archive; other workplaces alternate inn and longhouse")},
+		{TEXT("Cottage"), TEXT("Purpose.Home; five cottage shapes in rotation")},
+	};
+	TArray<TSharedPtr<FJsonValue>> Manifest;
+	for (const auto& Row : Rows)
+	{
+		const TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("building"), Row[0]);
+		Entry->SetStringField(TEXT("when"), Row[1]);
+		Manifest.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+	return Manifest;
 }
 
 bool FWorldDirectorCompiler::Resolve(
@@ -313,8 +425,7 @@ bool FWorldDirectorCompiler::Resolve(
 		SecondaryPavingBudget, OrderedPavedLocationIds.Num(),
 		*FString::Join(OrderedPavedLocationIds, TEXT(",")));
 	int32 HomeOrdinal = static_cast<int32>(StructureSeed % UE_ARRAY_COUNT(CertifiedHomeCapabilityIndices));
-	int32 LonghouseUseCount = 0;
-	int32 InnUseCount = 0;
+	FShellUseCounts ShellUses;
 	int32 HomeShellEligibleCount = 0;
 	int32 PublicShellEligibleCount = 0;
 	int32 LandmarkShellEligibleCount = 0;
@@ -323,8 +434,12 @@ bool FWorldDirectorCompiler::Resolve(
 		const FWorldLocation& Location = Spec.Locations[Index];
 		const bool bLandmark = OutPlan.LandmarkLocationId == Location.Id;
 		const bool bHome = !IsWorkplace(Location);
+		FWorldDirectorExpressionEntry Expression;
+		Expression.Field = FString::Printf(TEXT("locations[%d] %s"), Index, *Location.DisplayName);
+		Expression.Value = Location.PurposeTag.ToString();
 		const FBuildingCapability* Capability = ChooseCapability(
-			Location, HomeOrdinal, bLandmark, Spec.Seed, LonghouseUseCount, InnUseCount);
+			Location, HomeOrdinal, bLandmark, Spec.Seed, ShellUses, Expression);
+		OutPlan.Expression.Add(Expression);
 		HomeOrdinal += !bLandmark && bHome ? 1 : 0;
 		LandmarkShellEligibleCount += bLandmark ? 1 : 0;
 		HomeShellEligibleCount += !bLandmark && bHome ? 1 : 0;
@@ -355,6 +470,23 @@ bool FWorldDirectorCompiler::Resolve(
 		return false;
 	}
 
+	// Prose fields reach players only as text. Listing them keeps the expression report
+	// honest about how much of the model's writing changes what gets built.
+	auto AddTextOnly = [&OutPlan](const TCHAR* Field, const FString& Value)
+	{
+		FWorldDirectorExpressionEntry& Entry = OutPlan.Expression.AddDefaulted_GetRef();
+		Entry.Field = Field;
+		Entry.Value = Value.Left(120);
+		Entry.Outcome = TEXT("TextOnly");
+		Entry.Detail = TEXT("Shown as text (dialogue, motives or the environment summary); changes nothing that is built.");
+	};
+	AddTextOnly(TEXT("brief.theme"), Spec.Brief.Theme);
+	AddTextOnly(TEXT("topology.governance"), Spec.Topology.Governance);
+	AddTextOnly(TEXT("topology.historicalWound"), Spec.Topology.HistoricalWound);
+	AddTextOnly(TEXT("topology.currentTension"), Spec.Topology.CurrentTension);
+	AddTextOnly(TEXT("topology.supernaturalPremise"), Spec.Topology.SupernaturalPremise);
+	AddTextOnly(TEXT("topology.centralThreat"), Spec.Topology.CentralThreat);
+
 	TMap<FString, int32> ShellUseCounts;
 	int32 MostRepeatedShellCount = 0;
 	for (const FResolvedLocationPlan& Location : OutPlan.Locations)
@@ -366,7 +498,7 @@ bool FWorldDirectorCompiler::Resolve(
 	const int32 ExpectedDistinctShellCount =
 		FMath::Min(HomeShellEligibleCount,
 			static_cast<int32>(UE_ARRAY_COUNT(CertifiedHomeCapabilityIndices))) +
-		FMath::Min(PublicShellEligibleCount, 2) +
+		FMath::Min(PublicShellEligibleCount, 2 + FMath::Min(ShellUses.Watermill + ShellUses.Windmill + ShellUses.CivicHall, 4)) +
 		FMath::Min(LandmarkShellEligibleCount, 1);
 	if (MostRepeatedShellCount > RepetitionLimit ||
 		ShellUseCounts.Num() < ExpectedDistinctShellCount)
@@ -455,12 +587,7 @@ bool FWorldDirectorCompiler::Resolve(
 		SpawnTransform.AddToTranslation(
 			Home->Transform.GetRotation().RotateVector(LocalSpawnOffset));
 		Resolved.SpawnTransform = SpawnTransform;
-		Resolved.Schedule = {
-			{0, Resident.HomeLocationId},
-			{8, Resident.WorkplaceLocationId},
-			{18, OutPlan.LandmarkLocationId},
-			{21, Resident.HomeLocationId}
-		};
+		Resolved.Schedule = BuildResidentSchedule(Resident, OutPlan.LandmarkLocationId, Spec.Seed);
 		if (bLoadAssets)
 		{
 			VerifyAsset(
@@ -487,6 +614,63 @@ bool FWorldDirectorCompiler::Resolve(
 			return Issue.Severity == EWorldDirectorValidationSeverity::Error;
 		});
 	return OutReport.bValid;
+}
+
+TArray<FWorldDirectorScheduleStop> FWorldDirectorCompiler::BuildResidentSchedule(
+	const FResident& Resident,
+	const FString& LandmarkLocationId,
+	const int32 WorldSeed)
+{
+	const FString& Home = Resident.HomeLocationId;
+	const FString& Work = Resident.WorkplaceLocationId.IsEmpty() ? Home : Resident.WorkplaceLocationId;
+	const uint32 Hash = static_cast<uint32>(FWorldDirectorPhysicalGenerator::DeriveStageSeed(
+		WorldSeed, Resident.Id + TEXT("|schedule")));
+	const FName Occupation = Resident.OccupationTag;
+
+	if (Occupation == TEXT("Occupation.Guard") && (Hash & 1U) != 0U)
+	{
+		// Night watch: sleeps through the day, stands watch overnight.
+		return {{0, Work}, {7, Home}, {19, Work}};
+	}
+
+	int32 WorkStart = 7;
+	int32 WorkEnd = 17;
+	if (Occupation == TEXT("Occupation.Farmer"))
+	{
+		WorkStart = 6;
+		WorkEnd = 16;
+	}
+	else if (Occupation == TEXT("Occupation.Merchant"))
+	{
+		WorkStart = 9;
+		WorkEnd = 18;
+	}
+	else if (Occupation == TEXT("Occupation.Guard"))
+	{
+		WorkStart = 7;
+		WorkEnd = 19;
+	}
+	else if (Occupation == TEXT("Occupation.Herbalist"))
+	{
+		WorkStart = 8;
+		WorkEnd = 17;
+	}
+	else if (Occupation == TEXT("Occupation.Reeve"))
+	{
+		WorkStart = 8;
+		WorkEnd = 16;
+	}
+	const int32 Bedtime = 21 + static_cast<int32>((Hash >> 3) % 2U);
+	// Reeves always hold the evening at the landmark; about two in three others join.
+	const bool bEveningAtLandmark = !LandmarkLocationId.IsEmpty() &&
+		(Occupation == TEXT("Occupation.Reeve") || (Hash >> 1) % 3U != 0U);
+	TArray<FWorldDirectorScheduleStop> Schedule = {{0, Home}, {WorkStart, Work}};
+	if (WorkEnd < Bedtime)
+	{
+		Schedule.Add({WorkEnd, bEveningAtLandmark ? LandmarkLocationId : Home});
+	}
+	Schedule.Add({Bedtime, Home});
+	return Schedule;
 }
 
 bool FWorldDirectorCompiler::Spawn(

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
 import signal
 import shlex
@@ -27,6 +29,118 @@ MAX_RESPONSE_BYTES = 64_000
 MAX_VALIDATION_MESSAGE_CHARS = 512
 DEFAULT_COMPANION_TIMEOUT_SECONDS = 360.0
 DEFAULT_PROVIDER_ATTEMPTS = 2
+MINIMUM_RETRY_SECONDS = 30.0
+LANDFORMS = ("basin", "valley", "ridge", "coast", "marsh")
+# Mirrors FWorldDirectorPresentation::Fields(); the first option is the default, which
+# reproduces worlds generated before brief.presentation existed.
+PRESENTATION_OPTIONS = {
+    "fortification": ("open", "fenced", "palisade", "stockade"),
+    "waterLife": ("none", "fishing", "harbor"),
+    "justice": ("lenient", "stern", "grim"),
+    "fire": ("hearths", "braziers", "vigil", "smouldering"),
+    "timeOfDay": ("dawn", "morning", "midday", "dusk", "night"),
+    "weather": ("clear", "overcast", "misty", "stormy"),
+    "season": ("summer", "spring", "autumn"),
+    "roofPalette": ("natural", "weathered", "sooty", "ochre", "slate", "moss"),
+    "authorityColor": ("natural", "crimson", "azure", "gold", "verdant", "black"),
+}
+PRESENTATION_DEFAULTS = {name: options[0] for name, options in PRESENTATION_OPTIONS.items()}
+# Fallback copy of the manifest Unreal sends in capabilitySummary.buildable (built from
+# FWorldDirectorPresentation::Fields() and FWorldDirectorCompiler::BuildBuildingManifest()).
+# Only headless callers such as Scripts/worldgen_batch.py rely on it.
+DEFAULT_BUILDABLE_MANIFEST = {
+    "presentation": {
+        "fortification": {
+            "open": "No perimeter; fields and roads run straight into town.",
+            "fenced": "Low timber fence ring around the houses.",
+            "palisade": "Tall timber palisade with gatehouses where roads enter.",
+            "stockade": "Palisade plus watchtowers, spiked barricades and banners at the gates.",
+        },
+        "waterLife": {
+            "none": "No boats or piers.",
+            "fishing": "Two timber piers with rowboats; bridges where roads cross water. Needs coast, valley or marsh.",
+            "harbor": "Four piers with moored boats, crates and barrels; bridges where roads cross water. Needs coast, valley or marsh.",
+        },
+        "justice": {
+            "lenient": "No public punishment.",
+            "stern": "A gallows beside the seat of authority.",
+            "grim": "A gallows and coffins by the seat of authority, and a guillotine by the landmark.",
+        },
+        "fire": {
+            "hearths": "Cookfires at homes only.",
+            "braziers": "Lit braziers flank the landmark, the seat of authority and the gates.",
+            "vigil": "Braziers along the main streets and watchfires in the square, lit day and night.",
+            "smouldering": "Smoke rising from buildings the threat touches, with burnt wood piles.",
+        },
+        "timeOfDay": {
+            "dawn": "The player arrives at 06:00.", "morning": "The player arrives at 09:00.",
+            "midday": "The player arrives at 12:00.", "dusk": "The player arrives at 18:30.",
+            "night": "The player arrives at 22:00.",
+        },
+        "weather": {
+            "clear": "Clear sky.", "overcast": "Grey, flat light and a light breeze.",
+            "misty": "Thick ground fog that hides the far edge of town.",
+            "stormy": "Dark, desaturated light and trees and banners whipping in a gale.",
+        },
+        "season": {"summer": "Full green foliage.", "spring": "Fresh pale green foliage.",
+                   "autumn": "Amber and rust foliage."},
+        "roofPalette": {
+            "natural": "The pack's own roof colours.", "weathered": "Greyed, sun-faded roofs.",
+            "sooty": "Dark, soot-stained roofs.", "ochre": "Warm ochre roofs.",
+            "slate": "Cool blue-grey roofs.", "moss": "Moss-green roofs.",
+        },
+        "authorityColor": {
+            "natural": "Landmark and seat of authority share the town's roof palette.",
+            "crimson": "Crimson roofs on the landmark and seat of authority.",
+            "azure": "Azure roofs on the landmark and seat of authority.",
+            "gold": "Gold roofs on the landmark and seat of authority.",
+            "verdant": "Green roofs on the landmark and seat of authority.",
+            "black": "Black roofs on the landmark and seat of authority.",
+        },
+    },
+    "buildings": [
+        {"building": "Guildhall", "when": "the landmark (first landmarkLocationIds entry)"},
+        {"building": "Watermill", "when": "one Purpose.Workplace named with mill, waterwheel, weir or sluice"},
+        {"building": "Windmill", "when": "one Purpose.Workplace named with windmill, granary, grain, flour or threshing"},
+        {"building": "Civic hall", "when": "up to two: Purpose.Headquarters, or a Purpose.Workplace named with council, court, reeve, moot, assembly, archive or town hall"},
+        {"building": "Inn", "when": "Purpose.Clinic, Purpose.Shelter, or names with inn, market, ferry, healing, pilgrim or shelter"},
+        {"building": "Longhouse", "when": "names with longhouse, granary, watch or archive; other workplaces alternate inn and longhouse"},
+        {"building": "Cottage", "when": "Purpose.Home; five cottage shapes in rotation"},
+    ],
+    "notAvailable": ("Stone castles, temples, ruins, lighthouses, large docks, snow, desert, animals, "
+                     "and any tree but one village species. Keep these in prose."),
+}
+# The buildable manifest only helps the stages that choose what gets built.
+MANIFEST_SECTIONS_BY_STAGE = {
+    "interpret": ("presentation", "notAvailable"),
+    "topology": ("buildings", "notAvailable"),
+}
+
+# Codex features a pure JSON generator never needs. Disabling them removes their
+# tool definitions and instructions from every request's context.
+CODEX_DISABLED_FEATURES = (
+    "shell_tool",
+    "unified_exec",
+    "apps",
+    "plugins",
+    "memories",
+    "multi_agent",
+    "image_generation",
+    "browser_use",
+    "computer_use",
+    "in_app_browser",
+    "goals",
+    "hooks",
+    "view_image",
+    "tool_suggest",
+    "skill_search",
+    "skill_mcp_dependency_install",
+    "plugin_discovery_prefetch",
+)
+
+# Keywords that never belong in an output schema sent to the provider's strict
+# structured-output mode. The full canonical schema is still enforced locally.
+PROVIDER_SCHEMA_DROPPED_KEYWORDS = {"not", "uniqueItems", "minLength", "maxLength", "$schema", "$id", "title"}
 
 POPULATION_MIN_ITEMS = {
     "residents": 20,
@@ -180,59 +294,70 @@ def strict_json_loads(text: str) -> dict:
     return value
 
 
-def provider_json_loads(text: str) -> tuple[dict, list[str]]:
-    """Parse provider JSON while safely collapsing identical duplicate values.
+def provider_output_schema(schema: object) -> object:
+    """Project a canonical stage schema onto the provider's strict structured-output subset.
 
-    Model providers occasionally repeat a field verbatim in an otherwise valid
-    object. Treating that as an ambiguous document forces a costly retry even
-    though either occurrence produces the same value. Conflicting duplicates
-    remain invalid and are never resolved by choosing one occurrence.
+    Strict mode needs every object closed with all properties required and does not
+    accept some validation keywords. Dropping a keyword here only relaxes what the
+    provider enforces while decoding; the canonical schema is still validated locally.
     """
-    changes: list[str] = []
+    if isinstance(schema, list):
+        return [provider_output_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    projected: dict = {}
+    for key, value in schema.items():
+        if key in PROVIDER_SCHEMA_DROPPED_KEYWORDS:
+            continue
+        if key == "oneOf":
+            projected["anyOf"] = provider_output_schema(value)
+            continue
+        projected[key] = provider_output_schema(value)
+    if projected.get("type") == "object" and isinstance(projected.get("properties"), dict):
+        projected["additionalProperties"] = False
+        projected["required"] = list(projected["properties"])
+    return projected
 
-    def collapse_identical_duplicate_keys(
-        pairs: list[tuple[str, object]],
-    ) -> dict:
-        result = {}
-        for key, value in pairs:
-            if key not in result:
-                result[key] = value
-                continue
-            if result[key] != value:
-                raise ValueError(f"conflicting duplicate JSON key: {key}")
-            changes.append(f"Collapsed identical duplicate JSON key '{key}'.")
-        return result
 
-    def reject_constant(value: str) -> None:
-        raise ValueError(f"non-standard JSON number: {value}")
+def codex_home() -> Path:
+    configured = os.environ.get("CODEX_HOME", "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".codex"
 
-    def parse(candidate: str) -> object:
-        return json.loads(
-            candidate,
-            object_pairs_hook=collapse_identical_duplicate_keys,
-            parse_constant=reject_constant,
-        )
 
+def load_codex_model_catalog() -> dict[str, list[str]] | None:
+    """Return {model slug: supported reasoning efforts} from Codex's own model cache."""
     try:
-        value = parse(text)
-    except json.JSONDecodeError as error:
-        # Recover one narrow provider typo: `,"}` after a complete value. The
-        # marker must be immediately before an object close and near the parser
-        # failure. The repaired document still has to pass the full stage schema.
-        search_start = max(0, error.pos - 64)
-        search_end = min(len(text), error.pos + 64)
-        marker_start = text.rfind(',"}', search_start, search_end)
-        if marker_start < 0:
-            raise
-        changes.clear()
-        value = parse(text[:marker_start] + text[marker_start + 2:])
-        changes.insert(
-            0,
-            "Removed dangling quoted property marker before object close.",
+        data = json.loads((codex_home() / "models_cache.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    catalog: dict[str, list[str]] = {}
+    for model in data.get("models", []) if isinstance(data, dict) else []:
+        if not isinstance(model, dict) or not isinstance(model.get("slug"), str):
+            continue
+        catalog[model["slug"]] = [
+            str(level.get("effort"))
+            for level in model.get("supported_reasoning_levels", [])
+            if isinstance(level, dict) and level.get("effort")
+        ]
+    return catalog or None
+
+
+def validate_model_choice(model: str, reasoning_effort: str) -> None:
+    """Fail before spending a provider call on a model Codex no longer serves."""
+    catalog = load_codex_model_catalog()
+    if catalog is None or not model:
+        return
+    if model not in catalog:
+        raise ValueError(
+            f"model '{model}' is not in the installed Codex model catalog; "
+            f"choose one of: {', '.join(sorted(catalog))}"
         )
-    if not isinstance(value, dict):
-        raise ValueError("provider output must contain one JSON object")
-    return value, changes
+    supported = catalog[model]
+    if reasoning_effort and supported and reasoning_effort not in supported:
+        raise ValueError(
+            f"model '{model}' does not support reasoning effort '{reasoning_effort}'; "
+            f"supported: {', '.join(supported)}"
+        )
 
 
 def _referenced_definitions(value: object) -> set[str]:
@@ -584,9 +709,14 @@ def fixture_response(request: dict) -> dict:
     raise ValueError(f"unsupported stage: {stage}")
 
 
-def build_agent_prompt(request: dict) -> str:
+def build_agent_prompt(request: dict, include_schema: bool = True) -> str:
+    """Build the stage prompt.
+
+    include_schema=False is used when the schema travels as the provider's structured
+    output format instead; repeating it in the prompt only costs input tokens.
+    """
     stage = request["stage"]
-    capability_summary = request.get("capabilitySummary", {})
+    capability_summary = stage_capability_summary(request)
     current = compact_current_context(request)
     candidates = request.get("layoutCandidates", [])
     validation = compact_validation_issues(request)
@@ -634,11 +764,21 @@ def build_agent_prompt(request: dict) -> str:
     interpretation_rule = ""
     if stage == "interpret":
         interpretation_rule = (
-            "Commit to one strong landscape identity: river valley, broken ridge, storm coast, "
-            "reed marsh, or sheltered basin. Make terrainPreferences concrete enough to drive "
-            "landform, water, settlement morphology, sightlines, and cultivated ground; avoid "
-            "generic lists that request every biome. Give the place a memorable proper identity "
-            "and make its economy and central pressure visibly legible in the environment."
+            "Commit to one strong landscape identity and record it in brief.landform as exactly "
+            "one of: basin (sheltered bowl or caldera), valley (river valley or pass), ridge "
+            "(highland spine or hills), coast (shoreline or harbor), marsh (wetland or reed "
+            "channels). Unreal builds the terrain from brief.landform alone. Make "
+            "terrainPreferences describe only that landform concretely enough to drive water, "
+            "settlement morphology, sightlines, and cultivated ground; never name another "
+            "landform, even to rule it out. Give the place a memorable proper identity and make "
+            "its economy and central pressure visibly legible in the environment. "
+            "Only brief.landform and brief.presentation change what is built; prose fields are "
+            "shown as text. Pick each brief.presentation value from "
+            "capabilitySummary.buildable.presentation so the premise is visible: defences that "
+            "match the danger, water life for a waterside economy, justice that matches the "
+            "ruler, fire for vigils or a recent burning, and timeOfDay, weather, season and "
+            "colours for the mood. Anything in buildable.notAvailable cannot be built; carry "
+            "it through these choices or leave it to prose."
         )
     if stage == "topology":
         topology_rule = (
@@ -650,7 +790,34 @@ def build_agent_prompt(request: dict) -> str:
             "civic approach; workplaces and public anchors form a compact center; homes gather in "
             "recognizable wards; one cultivated or transport edge connects the town to its terrain. "
             "Keep the edge graph connected and hierarchical, with a civic spine and local branches "
-            "instead of a dense mesh. Location names and purposes must make these visual roles clear."
+            "instead of a dense mesh. Location names and purposes must make these visual roles clear. "
+            "Give exactly one location purposeTag Purpose.Landmark and list it first in "
+            "landmarkLocationIds; include at least one Purpose.Workplace and at least one location "
+            "with accessPolicy Public. Name owners and controllers with person-like IDs such as "
+            "resident.firstname.surname, and name the governing person in governance using that "
+            "same name. Location names choose buildings: use the words listed in "
+            "capabilitySummary.buildable.buildings to get a matching building; a name with none "
+            "of them gets a generic inn or longhouse."
+        )
+    schema_block = (
+        "Stage-specific JSON Schema:\n"
+        + json.dumps(response_schema, separators=(',', ':'), sort_keys=True)
+        if include_schema
+        else "The response format is enforced by the attached output schema."
+    )
+    town_contract = ""
+    if stage in {"population", "repair"}:
+        town_contract = (
+            "The final town must use 20-30 residents, 12-18 locations/buildings, a connected "
+            "network of reciprocal relationships, coherent households, at least one central "
+            "threat, the closed supplied fact set, and supported capability tags. The population "
+            "stage must include exactly one Proposed changeProject motivated by an existing "
+            "threat. It must use one supported conversion: Residence to temporary clinic, "
+            "Workplace to shelter, Shelter to faction headquarters, or Headquarters to active "
+            "workplace. Include the authority holder among required participants when the "
+            "initiator does not own or control the target. Use Condition.ThreatActive, "
+            "Condition.Overnight, and Condition.PlayerAway, schedule it at or after minute 1200, "
+            "and require 60-1440 transition minutes."
         )
     return f"""
 You are the World Director semantic generator. Complete only stage '{stage}'.
@@ -664,18 +831,10 @@ Return exactly one strict JSON object. Do not add keys outside this response sch
 emit duplicate keys, NaN, or Infinity. The following is only an outer-envelope example; populate
 every nested field required by the schema:
 {json.dumps(envelope_example, separators=(',', ':'), sort_keys=True)}
-Stage-specific JSON Schema:
-{json.dumps(response_schema, separators=(',', ':'), sort_keys=True)}
+{schema_block}
 Use lower-camel-case wire names matching the supplied current document. Preserve every supplied
-stable ID unless this is a targeted repair. The final town must use 20-30 residents, 12-18
-locations/buildings, a connected network of reciprocal relationships, coherent households, at
-least one central threat, the closed supplied fact set, and supported capability tags.
-The population stage must include exactly one Proposed changeProject motivated by an existing
-threat. It must use one supported conversion: Residence to temporary clinic, Workplace to
-shelter, Shelter to faction headquarters, or Headquarters to active workplace. Include the
-authority holder among required participants when the initiator does not own or control the
-target. Use Condition.ThreatActive, Condition.Overnight, and Condition.PlayerAway, schedule it
-at or after minute 1200, and require 60-1440 transition minutes.
+stable ID unless this is a targeted repair.
+{town_contract}
 
 Authoritative player prompt: {request.get('playerPrompt', '')!r}
 Original root seed: {request.get('seed', 0)}
@@ -1011,6 +1170,29 @@ def normalize_topology_response(request: dict, response: dict) -> list[str]:
         if candidate is not None:
             candidate["bRepurposable"] = True
             changes.append(f"made {candidate.get('id', 'one location')} eligible for the required change project")
+
+    # Unreal builds the landmark shell from landmarkLocationIds[0] and requires a
+    # Purpose.Landmark location. Keep only real IDs and put a true landmark first.
+    location_by_id = {item.get("id"): item for item in locations}
+    landmark_ids = [
+        item for item in _unique_strings(topology.get("landmarkLocationIds", []))
+        if item in location_by_id
+    ]
+    purpose_landmarks = [
+        item["id"] for item in locations if item.get("purposeTag") == "Purpose.Landmark"
+    ]
+    first_true_landmark = next(
+        (item for item in landmark_ids if item in purpose_landmarks),
+        purpose_landmarks[0] if purpose_landmarks else None,
+    )
+    if first_true_landmark is not None:
+        ordered = [first_true_landmark] + [item for item in landmark_ids if item != first_true_landmark]
+        if ordered != topology.get("landmarkLocationIds"):
+            topology["landmarkLocationIds"] = ordered
+            changes.append(f"listed Purpose.Landmark location {first_true_landmark} first among landmarks")
+        if not any(item.get("accessPolicy") == "Public" for item in locations):
+            location_by_id[first_true_landmark]["accessPolicy"] = "Public"
+            changes.append(f"opened landmark {first_true_landmark} to the public")
     return changes
 
 
@@ -1042,6 +1224,55 @@ def validate_topology_semantics(request: dict, response: dict) -> None:
             raise ValueError("topology threat references an unknown location")
     if not any(item.get("bRepurposable") for item in locations):
         raise ValueError("topology has no location eligible for the required change project")
+    # These mirror Unreal's full-slice rules (ValidateFullSliceWorldSpec). Catching them
+    # here lets the stage retry with the exact error instead of failing integration.
+    purposes = [item.get("purposeTag") for item in locations]
+    if "Purpose.Landmark" not in purposes:
+        raise ValueError("topology requires one location with purposeTag Purpose.Landmark")
+    if "Purpose.Workplace" not in purposes:
+        raise ValueError("topology requires at least one Purpose.Workplace location")
+    if not any(item.get("accessPolicy") == "Public" for item in locations):
+        raise ValueError("topology requires at least one location with accessPolicy Public")
+    landmark_ids = topology.get("landmarkLocationIds", [])
+    if not landmark_ids or next(
+        (item.get("purposeTag") for item in locations if item.get("id") == landmark_ids[0]), None
+    ) != "Purpose.Landmark":
+        raise ValueError("topology landmarkLocationIds must start with the Purpose.Landmark location")
+
+
+def validate_brief_semantics(request: dict, response: dict) -> None:
+    if request.get("stage") != "interpret":
+        return
+    landform = response["payload"]["brief"].get("landform")
+    if landform not in LANDFORMS:
+        raise ValueError(f"brief.landform must be one of {', '.join(LANDFORMS)}")
+    presentation = response["payload"]["brief"].get("presentation")
+    if not isinstance(presentation, dict):
+        raise ValueError("brief.presentation must be an object")
+    for name, options in PRESENTATION_OPTIONS.items():
+        if presentation.get(name) not in options:
+            raise ValueError(f"brief.presentation.{name} must be one of {', '.join(options)}")
+
+
+def normalize_brief_response(request: dict, response: dict) -> list[str]:
+    """Give briefs written before brief.presentation existed the defaults Unreal also uses."""
+    if request.get("stage") != "interpret":
+        return []
+    brief = response["payload"].get("brief")
+    if not isinstance(brief, dict) or "presentation" in brief:
+        return []
+    brief["presentation"] = dict(PRESENTATION_DEFAULTS)
+    return ["brief.presentation was missing; applied the defaults"]
+
+
+def stage_capability_summary(request: dict) -> dict:
+    """Keep only the manifest sections the current stage acts on."""
+    summary = dict(request.get("capabilitySummary", {}))
+    buildable = summary.pop("buildable", None) or DEFAULT_BUILDABLE_MANIFEST
+    sections = MANIFEST_SECTIONS_BY_STAGE.get(request.get("stage"))
+    if isinstance(buildable, dict) and sections:
+        summary["buildable"] = {key: buildable[key] for key in sections if key in buildable}
+    return summary
 
 
 def normalize_population_response(request: dict, response: dict) -> list[str]:
@@ -1443,176 +1674,598 @@ def normalize_and_validate_stage_response(request: dict, response: dict) -> tupl
         raise ValueError("agent response has the wrong or non-canonical stage envelope")
     if not isinstance(response.get("payload"), dict):
         raise ValueError("agent response payload must be an object")
-    changes = normalize_topology_response(request, response)
+    changes = normalize_brief_response(request, response)
+    changes.extend(normalize_topology_response(request, response))
     changes.extend(normalize_population_response(request, response))
     validate_stage_response(request, response)
+    validate_brief_semantics(request, response)
     validate_topology_semantics(request, response)
     validate_population_semantics(request, response)
     return response, changes
 
 
+FIRST_NAMES = (
+    "Mara", "Ivo", "Anwen", "Tomas", "Nia", "Corin", "Elian", "Sera", "Bryn", "Lina",
+    "Orin", "Mae", "Dara", "Eira", "Cal", "Rhea", "Jonas", "Talia", "Oren", "Vera",
+    "Ari", "Mira", "Cade", "Esme", "Theo", "Lysa", "Ren", "Ada", "Finn", "Noa",
+    "Hale", "Isolde", "Bram", "Wren", "Petra", "Silas", "Odette", "Garrick", "Yara", "Emrys",
+    "Tamsin", "Rook", "Liesl", "Benedek", "Saoirse", "Kestrel", "Ilse", "Torin", "Junia", "Aldo",
+    "Fen", "Marit", "Osric", "Delphine", "Huxley", "Rowena", "Taddeo", "Brannagh", "Quill", "Solveig",
+)
+FAMILY_NAMES = (
+    "Vale", "Reed", "Pike", "Wren", "Alder", "Ash", "Moss", "Finch", "Holt", "Ford",
+    "Bell", "Rowan", "Flint", "Fen", "Thorn", "Brook", "Gale", "Hart", "Lark", "Dunn",
+    "Stone", "Fenn", "Willow", "Rill", "Birch", "Crane", "Hawke", "Cove", "Marsh", "Ember",
+    "Cotter", "Hollis", "Mercer", "Sedge", "Tanner", "Ostler", "Larch", "Quarry", "Weir", "Sallow",
+)
+NON_PERSON_ID_TOKENS = {
+    "resident", "generated", "authority", "owner", "controller", "council", "town", "village",
+    "guild", "house", "hall", "the", "of", "district", "ward", "location", "loc", "people",
+    "folk", "community", "keepers", "keeper", "watch", "crew", "family", "clan", "elders",
+    "office", "collective", "board", "company", "trust", "order", "circle", "assembly",
+    "commons", "society", "brotherhood", "sisterhood", "league", "cooperative", "coop",
+}
+OCCUPATION_KEYWORDS = (
+    ("Occupation.Farmer", ("farm", "field", "orchard", "granary", "grain", "mill", "barn", "pasture",
+                           "garden", "harvest", "paddy", "flax", "vine", "herd", "fold", "grove")),
+    ("Occupation.Merchant", ("market", "trade", "store", "shop", "inn", "tavern", "ferry", "harbor",
+                             "dock", "quay", "caravan", "exchange", "wharf", "landing", "toll", "post")),
+    ("Occupation.Guard", ("watch", "gate", "guard", "tower", "beacon", "fort", "lookout", "barracks",
+                          "wall", "patrol", "garrison", "avalanche", "bell")),
+    ("Occupation.Herbalist", ("herb", "clinic", "heal", "apothecary", "infirmary", "shrine", "spring",
+                              "temple", "chapel", "physic", "remedy", "bath")),
+)
+MOTIVATION_TEMPLATES = {
+    "Occupation.Reeve": (
+        "Hold {settlement} together through what is coming: {threat}.",
+        "Settle the quarrel before it splits {settlement}: {tension}.",
+        "Make sure {settlement} never repeats its old mistake: {wound}.",
+    ),
+    "Occupation.Farmer": (
+        "Get every row at {workplace} harvested before the danger reaches it.",
+        "Prove that {workplace} can still feed every household in {settlement}.",
+        "Store enough from {workplace} that no family in {district} goes hungry.",
+    ),
+    "Occupation.Merchant": (
+        "Keep goods moving through {workplace} whatever comes: {threat}.",
+        "Turn the town's trouble into fair trade at {workplace}, not profiteering.",
+        "Clear what {workplace} owes before the season turns.",
+    ),
+    "Occupation.Guard": (
+        "Spot the danger first from {workplace} and buy {settlement} time to act.",
+        "Keep the ways past {workplace} open for everyone who has to leave.",
+        "Win back the trust the watch lost after {wound}.",
+    ),
+    "Occupation.Herbalist": (
+        "Have remedies ready at {workplace} before the injured arrive.",
+        "Find what the old stories say about the danger and use it.",
+        "Keep the frightened and the sick calm at {workplace}.",
+    ),
+    "Occupation.Worker": (
+        "Keep {workplace} running so the rest of {settlement} can rely on it.",
+        "Finish the repairs at {workplace} before they are needed.",
+        "Earn a voice in how {settlement} meets the danger: {threat}.",
+    ),
+}
+FEAR_TEMPLATES = (
+    "That {home} will be the first to suffer: {threat}.",
+    "That the quarrel will turn neighbours against each other: {tension}.",
+    "That {settlement} will forget its own warning: {wound}.",
+    "That {workplace} will be abandoned exactly when it matters.",
+    "That help will come too late for {district}.",
+    "That the secret everyone half-knows will come out at the worst moment.",
+    "That {leader} is hiding how bad things already are.",
+)
+MEMORY_TEMPLATES = (
+    "Remembers how it started: {statement}",
+    "Was there when it became plain: {statement}",
+    "Heard it from {other} and never forgot: {statement}",
+    "Still argues about it at supper: {statement}",
+)
+PROJECT_PURPOSE_NOUNS = {
+    "Purpose.Clinic": "temporary clinic",
+    "Purpose.Shelter": "public shelter",
+    "Purpose.Headquarters": "response headquarters",
+    "Purpose.Workplace": "working hall",
+}
+
+
+def _seeded_random(seed: object, salt: str) -> random.Random:
+    digest = hashlib.sha256(f"{seed}|{salt}".encode("utf-8")).digest()
+    return random.Random(int.from_bytes(digest[:8], "big"))
+
+
+def _clause(text: object, fallback: str, limit: int = 120) -> str:
+    """One readable clause from model-written prose, for template interpolation.
+
+    Only the first sentence is used, and it is shortened at a clause or word boundary,
+    so a template never ends mid-thought ("...drowning cultivated.").
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    value = re.split(r"(?<=[.!?;])\s+", value, maxsplit=1)[0].strip().rstrip(".!?;:")
+    if not value:
+        return fallback
+    if len(value) > limit:
+        shortened = value[:limit]
+        cut = max(shortened.rfind(", "), shortened.rfind(" and "), shortened.rfind(" while "),
+                  shortened.rfind(" as "), shortened.rfind(" because "), shortened.rfind(" but "))
+        if cut > limit // 3:
+            value = shortened[:cut]
+        else:
+            # No clause boundary: end on a word, never on a dangling function word.
+            words = shortened.rsplit(" ", 1)[0].split(" ")
+            while words and words[-1].lower() in {"to", "the", "a", "an", "of", "and", "for", "with", "in", "on", "at", "by"}:
+                words.pop()
+            value = " ".join(words)
+        value = value.rstrip(",;: ")
+    if len(value) > 1 and value[0].isupper() and not value[1].isupper():
+        value = value[0].lower() + value[1:]
+    return value
+
+
+ROLE_ID_TOKENS = {
+    "reeve", "merchant", "guard", "herbalist", "farmer", "worker", "captain", "elder", "keeper",
+    "smith", "warden", "healer", "miller", "ferryman", "boatwright", "wright", "priest",
+    "priestess", "mayor", "steward", "sheriff", "constable", "bailiff", "harbor", "harbormaster",
+    "master", "mistress", "chief", "head", "lord", "lady", "sir", "dame", "old", "young",
+}
+
+
+def _person_name_from_id(resident_id: str) -> str | None:
+    """Use an authority ID as a name only when it clearly names a person.
+
+    resident.elian.vesper -> "Elian Vesper"; resident.reeve.mara -> "Mara". Role-only,
+    institutional, or run-together IDs (resident.reevemara) return None so a generated
+    name is used instead of a mangled one.
+    """
+    match = re.match(r"^(?:resident|person|npc)[._-](.+)$", resident_id, flags=re.IGNORECASE)
+    if not match:
+        return None
+    tokens = [token for token in re.split(r"[._\-\s]+", match.group(1)) if token]
+    if any(not token.isalpha() or token.lower() in NON_PERSON_ID_TOKENS for token in tokens):
+        return None
+    tokens = [token for token in tokens if token.lower() not in ROLE_ID_TOKENS]
+    if not 1 <= len(tokens) <= 3 or any(len(token) > 10 for token in tokens):
+        return None
+    known_first_names = {name.lower() for name in FIRST_NAMES}
+    if len(tokens) == 1 and len(tokens[0]) > 7 and tokens[0].lower() not in known_first_names:
+        return None
+    return " ".join(token.capitalize() for token in tokens)
+
+
+def _occupation_for(location: dict, supported: set[str]) -> str:
+    identity = f"{location.get('id', '')} {location.get('displayName', '')}".lower()
+    choice = "Occupation.Worker"
+    if location.get("purposeTag") == "Purpose.Clinic":
+        choice = "Occupation.Herbalist"
+    for occupation, words in OCCUPATION_KEYWORDS:
+        if any(word in identity for word in words):
+            choice = occupation
+            break
+    if supported and choice not in supported:
+        return "Occupation.Worker" if "Occupation.Worker" in supported else next(
+            (tag for tag in sorted(supported) if tag.startswith("Occupation.")), choice
+        )
+    return choice
+
+
+def _bidirectional_pair(
+    relationships: list[dict], linked: set[frozenset], source: str, target: str,
+    relationship_type: str, scores: dict, key: str,
+) -> None:
+    pair = frozenset((source, target))
+    if source == target or pair in linked:
+        return
+    linked.add(pair)
+    forward_id = f"relationship.{key}.forward"
+    reverse_id = f"relationship.{key}.reverse"
+    for (first, second, own_id, other_id) in (
+        (source, target, forward_id, reverse_id),
+        (target, source, reverse_id, forward_id),
+    ):
+        relationships.append({
+            "version": 1,
+            "id": own_id,
+            "sourceResidentId": first,
+            "targetResidentId": second,
+            "relationshipType": relationship_type,
+            "bBidirectional": True,
+            "reciprocalRelationshipId": other_id,
+            **scores,
+        })
+
+
 def synthesized_population_response(request: dict) -> dict:
-    """Build the non-visual social compatibility layer locally and deterministically."""
+    """Build the social layer locally, deterministically, from the accepted topology.
+
+    No model call is made. Every name, occupation, motivation, household, rivalry, and
+    history event is derived from this world's topology, facts, and seed, so two worlds
+    with different premises produce different towns.
+    """
     current = request.get("current", {})
-    locations = copy.deepcopy(current.get("locations", [])) if isinstance(current, dict) else []
-    facts = copy.deepcopy(current.get("facts", [])) if isinstance(current, dict) else []
+    current = current if isinstance(current, dict) else {}
+    locations = copy.deepcopy(current.get("locations", []))
+    facts = copy.deepcopy(current.get("facts", []))
+    threats = current.get("threats", []) if isinstance(current.get("threats"), list) else []
+    topology = current.get("topology", {}) if isinstance(current.get("topology"), dict) else {}
+    brief = current.get("brief", {}) if isinstance(current.get("brief"), dict) else {}
     if not locations or not facts:
         raise ValueError("local population synthesis requires accepted locations and facts")
+    seed = request.get("seed", current.get("seed", 0))
+    rng = _seeded_random(seed, "population")
+    supported = _supported_tags(request)
+    location_by_id = {item["id"]: item for item in locations if isinstance(item.get("id"), str)}
+    homes = [item for item in locations if item.get("purposeTag") == "Purpose.Home"]
+    workplaces = [item for item in locations if item.get("purposeTag") != "Purpose.Home"]
+    if not homes:
+        raise ValueError("local population synthesis requires at least one home")
+    if not workplaces:
+        workplaces = list(homes)
+
+    settlement = _clause(brief.get("settlementIdentity"), "the settlement", 48)
+    if settlement and settlement[0].islower():
+        settlement = settlement[0].upper() + settlement[1:]
+    settlement = settlement.split(",")[0].split(" is ")[0].strip() or "the settlement"
+    # Models sometimes put a threat ID in centralThreat; prose reads better from the premise.
+    threat_text = str(topology.get("centralThreat") or "")
+    if " " not in threat_text.strip() and threats:
+        threat_text = str(threats[0].get("premise") or threat_text)
+    clauses = {
+        "settlement": settlement,
+        "threat": _clause(threat_text, "the danger at the edge of town"),
+        "tension": _clause(topology.get("currentTension"), "who should bear the cost of staying"),
+        "wound": _clause(topology.get("historicalWound"), "the year the town nearly failed"),
+    }
+
+    # Residents: every named authority first, then enough others for a seeded 20-30 town.
     authority_ids = _unique_strings([
         value
         for location in locations
         for value in (location.get("ownerResidentId"), location.get("controllerResidentId"))
         if isinstance(value, str) and value
-    ])
-    resident_ids = authority_ids[:30]
-    target_count = max(20, len(resident_ids))
+    ])[:30]
+    home_capacity = sum(max(0, int(item.get("residentCapacity", 0))) for item in homes)
+    # The model often states the population ("a town of 24 residents"); use it so the
+    # synthesized town does not contradict the world's own facts.
+    stated_text = " ".join(
+        [str(item) for item in brief.get("premises", [])] +
+        [str(item.get("statement", "")) for item in facts]
+    ).lower()
+    word_numbers = {
+        "twenty": 20, "twenty-one": 21, "twenty-two": 22, "twenty-three": 23, "twenty-four": 24,
+        "twenty-five": 25, "twenty-six": 26, "twenty-seven": 27, "twenty-eight": 28,
+        "twenty-nine": 29, "thirty": 30,
+    }
+    stated_count = None
+    match = re.search(r"\b(\d{2}|twenty(?:-\w+)?|thirty)\s+(?:residents|people|villagers|souls|inhabitants)", stated_text)
+    if match:
+        token = match.group(1)
+        stated_count = int(token) if token.isdigit() else word_numbers.get(token)
+    if stated_count is not None and 20 <= stated_count <= 30:
+        target_count = max(len(authority_ids), min(home_capacity, stated_count))
+    else:
+        target_count = max(len(authority_ids), min(30, home_capacity, 20 + rng.randint(0, 10)))
+    target_count = max(20, min(30, target_count))
+    resident_ids = list(authority_ids)
     while len(resident_ids) < target_count:
         candidate = f"resident.generated.{len(resident_ids) + 1:02d}"
         if candidate not in resident_ids:
             resident_ids.append(candidate)
-    homes = [item for item in locations if item.get("purposeTag") == "Purpose.Home"]
-    workplaces = [item for item in locations if item.get("purposeTag") == "Purpose.Workplace"]
-    if not homes:
-        raise ValueError("local population synthesis requires at least one home")
-    if not workplaces:
-        workplaces = [item for item in locations if item not in homes] or homes
-    supported = _supported_tags(request)
-    occupations = sorted(tag for tag in supported if tag.startswith("Occupation."))
-    if not occupations:
-        occupations = ["Occupation.Worker"]
-    generated_names = (
-        "Mara Vale", "Ivo Reed", "Anwen Pike", "Tomas Wren", "Nia Alder",
-        "Corin Ash", "Elian Moss", "Sera Finch", "Bryn Holt", "Lina Ford",
-        "Orin Bell", "Mae Rowan", "Dara Flint", "Eira Fen", "Cal Thorn",
-        "Rhea Brook", "Jonas Gale", "Talia Hart", "Oren Lark", "Vera Dunn",
-        "Ari Stone", "Mira Fenn", "Cade Willow", "Esme Rill", "Theo Birch",
-        "Lysa Crane", "Ren Hawke", "Ada Cove", "Finn Marsh", "Noa Ember",
+
+    # Homes: owners live in the homes they own; everyone else fills homes in proportion
+    # to capacity so household sizes vary instead of a fixed round-robin.
+    remaining = {item["id"]: max(0, int(item.get("residentCapacity", 0))) for item in homes}
+    home_of: dict[str, str] = {}
+    for home in homes:
+        for authority in (home.get("ownerResidentId"), home.get("controllerResidentId")):
+            if authority in resident_ids and authority not in home_of and remaining[home["id"]] > 0:
+                home_of[authority] = home["id"]
+                remaining[home["id"]] -= 1
+    unhoused = [item for item in resident_ids if item not in home_of]
+    rng.shuffle(unhoused)
+    for resident_id in unhoused:
+        open_homes = [home_id for home_id, slots in remaining.items() if slots > 0]
+        if not open_homes:
+            raise ValueError("topology home capacity is smaller than the synthesized population")
+        weights = [remaining[home_id] for home_id in open_homes]
+        home_id = rng.choices(open_homes, weights=weights, k=1)[0]
+        home_of[resident_id] = home_id
+        remaining[home_id] -= 1
+
+    # Names: person-like authority IDs keep their names; households share a surname.
+    surnames = list(FAMILY_NAMES)
+    rng.shuffle(surnames)
+    surname_of_home = {home["id"]: surnames[index % len(surnames)] for index, home in enumerate(homes)}
+    first_names = list(FIRST_NAMES)
+    rng.shuffle(first_names)
+    display_name: dict[str, str] = {}
+    used_first: set[str] = set()
+    for resident_id in resident_ids:
+        derived = _person_name_from_id(resident_id)
+        if derived:
+            parts = derived.split()
+            used_first.add(parts[0])
+            display_name[resident_id] = derived if len(parts) > 1 else f"{derived} {surname_of_home[home_of[resident_id]]}"
+    for resident_id in resident_ids:
+        if resident_id in display_name:
+            continue
+        first = next((name for name in first_names if name not in used_first), None)
+        if first is None:
+            first = rng.choice(FIRST_NAMES)
+        used_first.add(first)
+        display_name[resident_id] = f"{first} {surname_of_home[home_of[resident_id]]}"
+
+    # Leader: whoever the governance text names; otherwise the authority of the
+    # headquarters or landmark.
+    governance = str(topology.get("governance", "")).lower()
+    leader = next(
+        (rid for rid in resident_ids if display_name[rid].lower() in governance),
+        None,
+    ) or next(
+        (rid for rid in resident_ids
+         if re.search(rf"\b{re.escape(display_name[rid].split()[0].lower())}\b", governance)),
+        None,
     )
-    motivations = (
-        "Keep the settlement supplied through the present danger.",
-        "Protect the people who depend on this district.",
-        "Turn the town's old knowledge into a practical answer.",
-        "Hold the community together while its central tension unfolds.",
-        "Make the settlement safer without erasing what makes it home.",
-    )
-    fears = (
-        "The threat will isolate the outer homes first.",
-        "A rushed response will deepen the town's oldest division.",
-        "Vital supplies will fail before help can arrive.",
-        "The settlement will ignore a warning hidden in its own history.",
-        "Neighbors will turn on one another under pressure.",
-    )
+    if leader is None:
+        for purpose in ("Purpose.Headquarters", "Purpose.Landmark"):
+            authority = next((
+                item.get("controllerResidentId") or item.get("ownerResidentId")
+                for item in locations
+                if item.get("purposeTag") == purpose and
+                (item.get("controllerResidentId") or item.get("ownerResidentId")) in resident_ids
+            ), None)
+            if authority:
+                leader = authority
+                break
+    leader = leader or resident_ids[0]
+
+    # Workplaces: authorities work where they hold authority; others spread so every
+    # workplace is staffed before any gets a second worker.
+    workplace_of: dict[str, str] = {}
+    for location in workplaces:
+        for authority in (location.get("controllerResidentId"), location.get("ownerResidentId")):
+            if authority in resident_ids and authority not in workplace_of:
+                workplace_of[authority] = location["id"]
+    headquarters = next((item for item in locations if item.get("purposeTag") == "Purpose.Headquarters"), None)
+    if headquarters is not None:
+        workplace_of[leader] = headquarters["id"]
+    staffed = {item["id"]: 0 for item in workplaces}
+    for workplace_id in workplace_of.values():
+        if workplace_id in staffed:
+            staffed[workplace_id] += 1
+    unassigned = [item for item in resident_ids if item not in workplace_of]
+    rng.shuffle(unassigned)
+    for resident_id in unassigned:
+        fewest = min(staffed.values())
+        choices = sorted(item for item, count in staffed.items() if count == fewest)
+        workplace_id = rng.choice(choices)
+        workplace_of[resident_id] = workplace_id
+        staffed[workplace_id] += 1
+
+    # Models often write "Sunledge Ward: clustered homes on the sunny flank"; keep the name.
+    district_names = _unique_strings([
+        re.split(r"\s*(?::|—|–| - |\()", str(item), maxsplit=1)[0].strip()
+        for item in topology.get("districts", [])
+    ]) or [settlement]
+    district_of_home = {home["id"]: district_names[index % len(district_names)] for index, home in enumerate(homes)}
+    occupation_of = {
+        rid: ("Occupation.Reeve" if rid == leader and (not supported or "Occupation.Reeve" in supported)
+              else _occupation_for(location_by_id[workplace_of[rid]], supported))
+        for rid in resident_ids
+    }
+
+    # Beliefs and memories: everyone remembers a public fact; secrets stay with the
+    # leader and the few people closest to the place they concern.
+    public_facts = [item for item in facts if not item.get("bSecret")] or facts
+    secret_facts = [item for item in facts if item.get("bSecret")]
+    beliefs: list[dict] = []
+    memories_of: dict[str, list[dict]] = {rid: [] for rid in resident_ids}
+    beliefs_of: dict[str, list[str]] = {rid: [] for rid in resident_ids}
+
+    def add_belief(holder: str, fact: dict, secret: bool, source: str = "") -> None:
+        belief_id = f"belief.{len(beliefs) + 1:03d}"
+        beliefs.append({
+            "version": 1,
+            "id": belief_id,
+            "holderResidentId": holder,
+            "factId": fact["id"],
+            "confidence": round(rng.uniform(0.62, 0.95), 2),
+            "bImportantSecret": bool(secret and fact.get("bEstablished")),
+            "sourceResidentId": source,
+            "secrecy": round(rng.uniform(0.7, 0.92) if secret else rng.uniform(0.08, 0.35), 2),
+            "emotionalSignificance": round(rng.uniform(0.45, 0.9), 2),
+            "willingnessToShare": round(rng.uniform(0.1, 0.32) if secret else rng.uniform(0.55, 0.9), 2),
+        })
+        beliefs_of[holder].append(belief_id)
+
+    for index, rid in enumerate(resident_ids):
+        fact = public_facts[(index + rng.randint(0, len(public_facts) - 1)) % len(public_facts)]
+        other = display_name[resident_ids[(index + 3) % len(resident_ids)]].split()[0]
+        template = MEMORY_TEMPLATES[rng.randrange(len(MEMORY_TEMPLATES))]
+        memories_of[rid].append({
+            "id": f"memory.{index + 1:02d}.1",
+            "factId": fact["id"],
+            "summary": template.format(statement=str(fact.get("statement", "")).strip(), other=other),
+            "day": max(0, int(fact.get("establishedDay", 0))),
+            "emotionalSignificance": round(rng.uniform(0.4, 0.9), 2),
+        })
+        add_belief(rid, fact, False)
+    for fact_index, fact in enumerate(secret_facts):
+        holders = [leader]
+        affected = next(
+            (item for item in threats if item.get("affectedLocationIds")), {}
+        ).get("affectedLocationIds", [])
+        for location_id in affected:
+            authority = (location_by_id.get(location_id) or {}).get("controllerResidentId")
+            if authority in resident_ids and authority not in holders:
+                holders.append(authority)
+                break
+        holders.append(resident_ids[(fact_index * 7 + 5) % len(resident_ids)])
+        for holder in dict.fromkeys(holders):
+            add_belief(holder, fact, True, source="" if holder == leader else leader)
+            memories_of[holder].append({
+                "id": f"memory.secret.{fact_index + 1}.{len(memories_of[holder]) + 1}",
+                "factId": fact["id"],
+                "summary": f"Keeps this to themself: {str(fact.get('statement', '')).strip()}",
+                "day": max(0, int(fact.get("establishedDay", 0))),
+                "emotionalSignificance": round(rng.uniform(0.7, 0.95), 2),
+            })
+
     residents = []
-    for index, resident_id in enumerate(resident_ids):
-        home = homes[index % len(homes)]
-        workplace = workplaces[index % len(workplaces)]
-        fact = facts[index % len(facts)]
-        id_name = resident_id.removeprefix("resident.").replace("_", " ").replace(".", " ").title()
-        display_name = (
-            generated_names[index % len(generated_names)]
-            if not id_name.strip() or
-            any(token in resident_id.lower() for token in ("generated", "authority", "owner", "controller"))
-            else id_name
-        )
+    for index, rid in enumerate(resident_ids):
+        home = location_by_id[home_of[rid]]
+        workplace = location_by_id[workplace_of[rid]]
+        occupation = occupation_of[rid]
+        values = {
+            **clauses,
+            "workplace": workplace.get("displayName") or workplace["id"],
+            "home": home.get("displayName") or home["id"],
+            "district": district_of_home[home["id"]],
+            "leader": display_name[leader] if rid != leader else "the council",
+        }
+        motivations = MOTIVATION_TEMPLATES.get(occupation, MOTIVATION_TEMPLATES["Occupation.Worker"])
         residents.append({
             "version": 1,
-            "id": resident_id,
-            "displayName": display_name,
+            "id": rid,
+            "displayName": display_name[rid],
             "homeLocationId": home["id"],
             "workplaceLocationId": workplace["id"],
-            "householdId": f"household.generated.{index % len(homes) + 1}",
-            "occupationTag": occupations[index % len(occupations)],
+            "householdId": f"household.{home['id']}",
+            "occupationTag": occupation,
             "bEmployed": True,
             "currentLocationId": home["id"],
-            "motivation": motivations[index % len(motivations)],
-            "fear": fears[index % len(fears)],
-            "importantMemories": [{
-                "id": f"memory.generated.{index + 1:02d}",
-                "factId": fact["id"],
-                "summary": f"Remembers why this matters: {fact['statement']}",
-                "day": 0,
-                "emotionalSignificance": 0.65,
-            }],
+            "motivation": motivations[rng.randrange(len(motivations))].format(**values),
+            "fear": FEAR_TEMPLATES[rng.randrange(len(FEAR_TEMPLATES))].format(**values),
+            "importantMemories": memories_of[rid],
             "availability": "Available",
-            "beliefIds": [f"belief.generated.{index + 1:02d}"],
+            "beliefIds": beliefs_of[rid],
             "relationshipIds": [],
         })
+    resident_by_id = {item["id"]: item for item in residents}
+
     households = []
-    for index, home in enumerate(homes):
-        members = [
-            resident["id"] for resident in residents
-            if resident["homeLocationId"] == home["id"]
-        ]
+    for home in homes:
+        members = [rid for rid in resident_ids if home_of[rid] == home["id"]]
         if members:
-            household_id = f"household.generated.{index + 1}"
             households.append({
                 "version": 1,
-                "id": household_id,
+                "id": f"household.{home['id']}",
                 "homeLocationId": home["id"],
                 "memberResidentIds": members,
             })
-            for resident in residents:
-                if resident["id"] in members:
-                    resident["householdId"] = household_id
-    beliefs = [{
-        "version": 1,
-        "id": f"belief.generated.{index + 1:02d}",
-        "holderResidentId": resident["id"],
-        "factId": facts[index % len(facts)]["id"],
-        "confidence": 0.72,
-        "bImportantSecret": False,
-        "sourceResidentId": "",
-        "secrecy": 0.2,
-        "emotionalSignificance": 0.6,
-        "willingnessToShare": 0.65,
-    } for index, resident in enumerate(residents)]
-    relationships = []
-    for index, source in enumerate(residents):
-        target = residents[(index + 1) % len(residents)]
-        forward_id = f"relationship.generated.{index}.forward"
-        reverse_id = f"relationship.generated.{index}.reverse"
-        common = {
-            "version": 1,
-            "relationshipType": "Relationship.CommunityTie",
-            "bBidirectional": True,
-            "trust": 0.58,
-            "affinity": 0.5,
-            "fear": 0.08,
-            "obligation": 0.45,
+
+    # Relationships: family chains, coworker chains, the leader's ties to other
+    # authorities, and a few cross-district rivalries that carry the town's tension.
+    relationships: list[dict] = []
+    linked: set[frozenset] = set()
+
+    def scores(trust: tuple, affinity: tuple, fear: tuple, obligation: tuple) -> dict:
+        return {
+            "trust": round(rng.uniform(*trust), 2),
+            "affinity": round(rng.uniform(*affinity), 2),
+            "fear": round(rng.uniform(*fear), 2),
+            "obligation": round(rng.uniform(*obligation), 2),
         }
-        relationships.append({
-            **common, "id": forward_id, "sourceResidentId": source["id"],
-            "targetResidentId": target["id"], "reciprocalRelationshipId": reverse_id,
-        })
-        relationships.append({
-            **common, "id": reverse_id, "sourceResidentId": target["id"],
-            "targetResidentId": source["id"], "reciprocalRelationshipId": forward_id,
-        })
+
+    for household in households:
+        members = household["memberResidentIds"]
+        for index in range(len(members) - 1):
+            _bidirectional_pair(relationships, linked, members[index], members[index + 1],
+                                "Relationship.Family", scores((0.72, 0.92), (0.65, 0.92), (0.0, 0.12), (0.6, 0.88)),
+                                f"family.{len(linked) + 1:03d}")
+    by_workplace: dict[str, list[str]] = {}
+    for rid in resident_ids:
+        by_workplace.setdefault(workplace_of[rid], []).append(rid)
+    for workplace_id in sorted(by_workplace):
+        members = by_workplace[workplace_id]
+        for index in range(len(members) - 1):
+            _bidirectional_pair(relationships, linked, members[index], members[index + 1],
+                                "Relationship.Coworker", scores((0.55, 0.78), (0.4, 0.7), (0.02, 0.18), (0.3, 0.55)),
+                                f"coworker.{len(linked) + 1:03d}")
+    for authority in [item for item in authority_ids if item != leader][:6]:
+        _bidirectional_pair(relationships, linked, leader, authority,
+                            "Relationship.Authority", scores((0.45, 0.72), (0.3, 0.6), (0.12, 0.35), (0.55, 0.85)),
+                            f"authority.{len(linked) + 1:03d}")
+    rivalry_target = 2 + rng.randint(0, 2)
+    attempts = 0
+    rivalries = 0
+    while rivalries < rivalry_target and attempts < 200:
+        attempts += 1
+        first, second = rng.sample(resident_ids, 2)
+        if home_of[first] == home_of[second] or frozenset((first, second)) in linked:
+            continue
+        _bidirectional_pair(relationships, linked, first, second,
+                            "Relationship.Rival", scores((0.12, 0.35), (0.08, 0.3), (0.3, 0.55), (0.05, 0.25)),
+                            f"rival.{len(linked) + 1:03d}")
+        rivalries += 1
     for resident in residents:
         resident["relationshipIds"] = [
             item["id"] for item in relationships
             if resident["id"] in {item["sourceResidentId"], item["targetResidentId"]}
         ]
+
+    # History: the established public facts become dated events with witnesses, and
+    # the current tension becomes the most recent meeting at the landmark.
+    landmark_ids = [item for item in topology.get("landmarkLocationIds", []) if item in location_by_id]
+    landmark_id = landmark_ids[0] if landmark_ids else locations[0]["id"]
+    events = []
+    dated = sorted(
+        (item for item in public_facts if item.get("bEstablished")),
+        key=lambda item: int(item.get("establishedDay", 0)),
+    )[:2]
+    for index, fact in enumerate(dated):
+        witnesses = [item["holderResidentId"] for item in beliefs if item["factId"] == fact["id"]][:3]
+        events.append({
+            "version": 1,
+            "id": f"event.history.{index + 1}",
+            "day": max(0, int(fact.get("establishedDay", 0))),
+            "summary": str(fact.get("statement", "")).strip() or "The town remembers this day.",
+            "participantResidentIds": witnesses,
+            "locationIds": [landmark_id],
+            "revealedFactIds": [fact["id"]],
+        })
+    latest_day = max([int(item.get("establishedDay", 0)) for item in facts] + [0])
+    rivals = [item for item in relationships if item["relationshipType"] == "Relationship.Rival"]
+    events.append({
+        "version": 1,
+        "id": "event.recent_dispute",
+        "day": latest_day,
+        "summary": f"A heated meeting at {location_by_id[landmark_id].get('displayName', landmark_id)}: "
+                   f"{clauses['tension']}.",
+        "participantResidentIds": list(dict.fromkeys(
+            [leader] + ([rivals[0]["sourceResidentId"], rivals[0]["targetResidentId"]] if rivals else [])
+        )),
+        "locationIds": [landmark_id],
+        "revealedFactIds": [],
+    })
+
+    # Change project: adapt a building the central threat actually touches.
     conversions = {
         "Purpose.Home": "Purpose.Clinic",
         "Purpose.Workplace": "Purpose.Shelter",
         "Purpose.Shelter": "Purpose.Headquarters",
         "Purpose.Headquarters": "Purpose.Workplace",
     }
-    target = next(
-        (item for item in locations if item.get("bRepurposable") and item.get("purposeTag") in conversions),
-        next((item for item in locations if item.get("purposeTag") in conversions), None),
-    )
-    if target is None:
+    affected_ids = {location_id for item in threats for location_id in item.get("affectedLocationIds", [])}
+    eligible = [
+        item for item in locations
+        if item.get("bRepurposable") and item.get("purposeTag") in conversions
+    ] or [item for item in locations if item.get("purposeTag") in conversions]
+    if not eligible:
         raise ValueError("local population synthesis requires a convertible location")
-    initiator = target.get("controllerResidentId") or target.get("ownerResidentId") or residents[0]["id"]
+    target = next((item for item in eligible if item["id"] in affected_ids), eligible[0])
+    initiator = next(
+        (item for item in (target.get("controllerResidentId"), target.get("ownerResidentId"))
+         if item in resident_by_id),
+        leader,
+    )
+    desired = conversions[target["purposeTag"]]
     project_capabilities = {
         "Purpose.Clinic": ["Capability.Bed", "Capability.Counter", "Capability.Door", "Capability.Interior"],
         "Purpose.Shelter": ["Capability.Bed", "Capability.Chair", "Capability.Door", "Capability.Interior"],
         "Purpose.Headquarters": ["Capability.WorkSurface", "Capability.Chair", "Capability.Door", "Capability.Interior"],
         "Purpose.Workplace": ["Capability.WorkSurface", "Capability.Counter", "Capability.Door", "Capability.Interior"],
     }
-    desired = conversions[target["purposeTag"]]
     required_capabilities = project_capabilities[desired]
     if supported:
         required_capabilities = [item for item in required_capabilities if item in supported]
@@ -1623,21 +2276,24 @@ def synthesized_population_response(request: dict) -> dict:
             "households": households,
             "relationships": relationships,
             "beliefs": beliefs,
-            "events": [],
+            "events": events,
             "changeProjects": [{
                 "version": 1,
                 "id": "project.generated.adaptation",
                 "initiatorResidentId": initiator,
                 "targetLocationId": target["id"],
                 "desiredPurposeTag": desired,
-                "reason": "Adapt one existing building to the settlement's active threat.",
-                "requiredParticipantResidentIds": [initiator],
+                "reason": (
+                    f"Turn {target.get('displayName') or target['id']} into a "
+                    f"{PROJECT_PURPOSE_NOUNS[desired]} to answer the danger: {clauses['threat']}."
+                ),
+                "requiredParticipantResidentIds": list(dict.fromkeys([initiator, leader])),
                 "requiredCapabilityTags": required_capabilities,
                 "requiredConditionTags": [
                     "Condition.ThreatActive", "Condition.Overnight", "Condition.PlayerAway"
                 ],
                 "intendedStartMinute": 1200,
-                "requiredTransitionMinutes": 360,
+                "requiredTransitionMinutes": rng.choice((240, 300, 360, 420)),
                 "state": "Proposed",
             }],
         },
@@ -1654,7 +2310,7 @@ def synthesized_population_response(request: dict) -> dict:
         "outputTokens": 0,
         "reasoningOutputTokens": 0,
         "normalizationChanges": changes,
-        "costNote": "No model call was made for the non-visual population compatibility layer.",
+        "costNote": "No model call was made for the population layer; it is derived from the topology.",
     }
     return response
 
@@ -1679,6 +2335,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
         raise ValueError("model contains unsupported characters")
     if reasoning_effort not in {"", "low", "medium", "high", "xhigh", "max", "ultra"}:
         raise ValueError("unsupported reasoning effort")
+    structured_output = not configured
     if configured:
         command = shlex.split(configured)
         command = [
@@ -1687,6 +2344,8 @@ def cli_response(request: dict, output_path: Path) -> dict:
             )
             for argument in command
         ]
+        # A configured provider opts into structured output by accepting {schema}.
+        structured_output = any("{schema}" in argument for argument in command)
     else:
         codex = discover_codex()
         if not codex:
@@ -1695,6 +2354,10 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "in PATH, /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, or a standard "
                 "macOS Codex/ChatGPT application location."
             )
+        validate_model_choice(requested_model, reasoning_effort)
+        # The agent runs in an empty working directory with every tool-bearing feature
+        # disabled and no skill catalog, and the stage schema is enforced by the
+        # provider's structured output. Auth still comes from the user's CODEX_HOME.
         command = [
             codex,
             "--ask-for-approval",
@@ -1703,15 +2366,28 @@ def cli_response(request: dict, output_path: Path) -> dict:
             "read-only",
             "exec",
             "--ignore-user-config",
+            "--ignore-rules",
             "--ephemeral",
             "--skip-git-repo-check",
+            "--cd",
+            "{workdir}",
             "--color",
             "never",
             "--json",
+            "--output-schema",
+            "{schema}",
             "--output-last-message",
             "{output}",
-            "-",
+            "--config",
+            "skills.include_instructions=false",
+            "--config",
+            "cloud.skills.enabled=false",
+            "--config",
+            "tools.update_plan.enabled=false",
         ]
+        for feature in CODEX_DISABLED_FEATURES:
+            command.extend(["--disable", feature])
+        command.append("-")
         if requested_model:
             command[1:1] = ["--model", requested_model]
         if reasoning_effort:
@@ -1720,7 +2396,10 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 f'model_reasoning_effort="{reasoning_effort}"',
             ]
 
-    base_prompt = build_agent_prompt(request)
+    base_prompt = build_agent_prompt(request, include_schema=not structured_output)
+    output_schema_json = json.dumps(
+        provider_output_schema(stage_response_schema(request)), separators=(",", ":")
+    )
     if len(base_prompt.encode("utf-8")) > MAX_REQUEST_BYTES:
         raise ValueError(
             f"constructed prompt exceeds the {MAX_REQUEST_BYTES}-byte local CLI budget"
@@ -1737,10 +2416,14 @@ def cli_response(request: dict, output_path: Path) -> dict:
     )
     deadline = provider_started + timeout_seconds
     try:
-        provider_attempt_limit = int(request.get("providerMaxAttempts", DEFAULT_PROVIDER_ATTEMPTS))
+        provider_attempt_limit = int(
+            os.environ.get("WORLD_DIRECTOR_PROVIDER_MAX_ATTEMPTS")
+            or request.get("providerMaxAttempts", DEFAULT_PROVIDER_ATTEMPTS)
+        )
     except (TypeError, ValueError):
         provider_attempt_limit = DEFAULT_PROVIDER_ATTEMPTS
     provider_attempt_limit = max(1, min(3, provider_attempt_limit))
+    previous_attempt_seconds = 0.0
     attempt_records: list[dict] = []
     totals = {
         "inputTokens": 0,
@@ -1759,6 +2442,14 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 f"CLI agent exhausted the companion timeout of {timeout_seconds:.1f} seconds."
             )
             break
+        # A corrective retry that cannot finish only converts a clear validation
+        # error into a timeout. Require roughly the time the failed attempt took.
+        if provider_attempt > 1 and remaining < max(MINIMUM_RETRY_SECONDS, previous_attempt_seconds):
+            last_error = RuntimeError(
+                f"{last_error}; only {remaining:.0f}s of the stage budget remained, "
+                "not enough for a corrective retry"
+            )
+            break
         prompt = base_prompt + correction
         if len(prompt.encode("utf-8")) > MAX_REQUEST_BYTES:
             raise ValueError(
@@ -1772,7 +2463,16 @@ def cli_response(request: dict, output_path: Path) -> dict:
         attempt_started = time.perf_counter()
         with tempfile.TemporaryDirectory(prefix="world-director-") as temp_dir:
             agent_output = Path(temp_dir) / "agent-response.json"
-            expanded = [arg.replace("{output}", str(agent_output)) for arg in command]
+            schema_path = Path(temp_dir) / "output-schema.json"
+            schema_path.write_text(output_schema_json, encoding="utf-8")
+            work_directory = Path(temp_dir) / "workdir"
+            work_directory.mkdir()
+            expanded = [
+                arg.replace("{output}", str(agent_output))
+                .replace("{schema}", str(schema_path))
+                .replace("{workdir}", str(work_directory))
+                for arg in command
+            ]
             _ACTIVE_TELEMETRY_PATH = telemetry_path
             timed_out = False
             process = subprocess.Popen(
@@ -1812,6 +2512,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
             if not raw_response and configured:
                 raw_response = stdout_text
 
+        previous_attempt_seconds = time.perf_counter() - attempt_started
         events_path.write_text(provider_events, encoding="utf-8")
         raw_response_path.write_text(raw_response, encoding="utf-8")
         attempt_events_path = artifact_path(
@@ -1861,15 +2562,10 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 raise ValueError(
                     f"response exceeds the {MAX_RESPONSE_BYTES}-byte local CLI budget"
                 )
-            response, parse_normalization_changes = provider_json_loads(
-                strip_code_fence(raw_response)
-            )
+            response = strict_json_loads(strip_code_fence(raw_response))
             record["parseSuccess"] = True
-            response, schema_normalization_changes = normalize_and_validate_stage_response(
+            response, normalization_changes = normalize_and_validate_stage_response(
                 request, response
-            )
-            normalization_changes = (
-                parse_normalization_changes + schema_normalization_changes
             )
             record["schemaSuccess"] = True
             record["normalizationChanges"] = normalization_changes
@@ -1894,6 +2590,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "providerStderr": (stderr or "")[-8000:],
                 "timedOut": False,
                 "timeoutSeconds": timeout_seconds,
+                "structuredOutput": structured_output,
                 "parseSuccess": True,
                 "schemaSuccess": True,
                 "providerAttemptCount": provider_attempt,
@@ -1936,6 +2633,7 @@ def cli_response(request: dict, output_path: Path) -> dict:
                 "exitCode": return_code,
                 "timedOut": timed_out,
                 "timeoutSeconds": timeout_seconds,
+                "structuredOutput": structured_output,
                 "parseSuccess": record["parseSuccess"],
                 "schemaSuccess": False,
                 "providerAttemptCount": provider_attempt,
@@ -1990,7 +2688,9 @@ def main() -> int:
     else:
         response = cli_response(request, args.output)
     temp_output = args.output.with_suffix(args.output.suffix + ".tmp")
-    temp_output.write_text(json.dumps(response, indent=2) + "\n", encoding="utf-8")
+    temp_output.write_text(
+        json.dumps(response, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
     temp_output.replace(args.output)
     return 0
 

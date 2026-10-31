@@ -242,14 +242,28 @@ private:
 	bool BuildTerrainAndSurfaces(const FResolvedWorldPlan& Plan, FValidationReport& OutReport);
 	void BuildRouteSurfaces(const FResolvedWorldPlan& Plan);
 	void BuildDressing(const FResolvedWorldPlan& Plan, FValidationReport& OutReport);
-	UInstancedStaticMeshComponent* FindOrCreateInstanceComponent(UStaticMeshComponent* Source);
-	void CollapseActorToInstances(AActor* SourceActor);
+	void BuildFeatures(const FResolvedWorldPlan& Plan, FValidationReport& OutReport);
+	/** Roof, foliage and wind material changes for brief.presentation. */
+	void ApplyPresentationMaterials(const FResolvedWorldPlan& Plan);
+	UInstancedStaticMeshComponent* FindOrCreateInstanceComponent(UStaticMeshComponent* Source, bool bAuthority);
+	void CollapseActorToInstances(AActor* SourceActor, bool bAuthority);
 
 	UPROPERTY(Transient)
 	TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>> WorldDirectorInstanceComponents;
 
+	/** Collapsed shells of the landmark and seat of authority, kept apart so their roofs can take the authority colour. */
+	UPROPERTY(Transient)
+	TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>> AuthorityInstanceComponents;
+
 	UPROPERTY(Transient)
 	TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> DressingInstanceComponents;
+
+	/** Palisade walls and watchtowers: dressing that blocks movement and shapes the navmesh. */
+	UPROPERTY(Transient)
+	TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> SolidDressingInstanceComponents;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<AActor>> FeatureActors;
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<class ALandscapeProxy>> HiddenAuthoredLandscapes;
@@ -315,6 +329,10 @@ public:
 
 	UFUNCTION()
 	void HandlePlayerGenerationFinished(bool bSuccess, const FString& RunId, const FString& Error);
+
+	/** Polls until the compiled town's navmesh is built, then records playability in the run summary. */
+	UFUNCTION()
+	void ContinuePlayabilityProbe();
 
 	UFUNCTION(BlueprintCallable, Category = "World Director|Player Flow")
 	bool BeginPlayerWorldGeneration(
@@ -422,12 +440,18 @@ public:
 private:
 	bool CompileGeneratedWorld();
 	void DestroyCurrentTown();
+	void BeginPlayabilityProbe();
+	FWorldDirectorPlayabilityRecord BuildPlayabilityRecord(bool bNavigationBuilt, double NavigationWaitSeconds) const;
+	FTimerHandle PlayabilityProbeHandle;
+	double PlayabilityProbeStartedAt = 0.0;
 	void ApplyPlayerInputMode();
 	bool bInteractionCursorMode = false;
 	FTimerHandle CreationMenuRetryHandle;
 	FTimerHandle SampleWorldCompileHandle;
 	void CompileSampleWorldPreview();
 	TMap<FString, FVector> TravelCheckStartLocations;
+	TSet<FString> TravelCheckDepartingResidents;
+	int32 ProjectCheckNavigationRetryCount = 0;
 	bool bAutomatedGenerationPrompted = false;
 	bool bAutomatedGenerationExpectsTimeout = false;
 	bool bAutomatedGenerationExpectsCancellation = false;

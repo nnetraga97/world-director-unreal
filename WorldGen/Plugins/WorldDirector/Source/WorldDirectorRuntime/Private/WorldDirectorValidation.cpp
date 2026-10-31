@@ -1,6 +1,8 @@
 #include "WorldDirectorValidation.h"
 
 #include "WorldDirectorJson.h"
+#include "WorldDirectorPhysicalGenerator.h"
+#include "WorldDirectorPresentation.h"
 
 namespace
 {
@@ -115,6 +117,15 @@ FValidationReport FWorldDirectorValidator::Validate(
 			TEXT("generation.brief_incomplete"), TEXT("$.brief"),
 			TEXT("World brief requires a theme, settlement identity, and terrain preferences."));
 	}
+	if (!Spec.Brief.Landform.IsEmpty() &&
+		!FWorldDirectorPhysicalGenerator::TryParseLandform(Spec.Brief.Landform, nullptr))
+	{
+		Report.AddError(
+			TEXT("brief.landform_unsupported"), TEXT("$.brief.landform"),
+			FString::Printf(TEXT("Landform '%s' must be basin, valley, ridge, coast, or marsh."),
+				*Spec.Brief.Landform));
+	}
+	FWorldDirectorPresentation::Validate(Spec.Brief.Presentation, TEXT("$.brief.presentation"), Report);
 	if (Spec.Topology.Districts.IsEmpty() || Spec.Topology.Governance.IsEmpty() ||
 		Spec.Topology.HistoricalWound.IsEmpty() || Spec.Topology.CurrentTension.IsEmpty() ||
 		Spec.Topology.SupernaturalPremise.IsEmpty() || Spec.Topology.CentralThreat.IsEmpty())

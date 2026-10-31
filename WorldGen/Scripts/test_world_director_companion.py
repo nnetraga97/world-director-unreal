@@ -33,6 +33,8 @@ FIXTURE_PATH = (
     / "Fixtures"
     / "living-town.json"
 )
+CORPUS_PATH = FIXTURE_PATH.with_name("model-output-corpus.json")
+SCHEMA_PATH = FIXTURE_PATH.parents[1] / "Schemas" / "world-director.schema.json"
 
 
 def request_for(stage: str) -> dict:
@@ -116,8 +118,9 @@ def integrated_request_for(stage: str) -> dict:
 
 class CompanionContractTests(unittest.TestCase):
     def test_live_prompts_are_neutral_valid_and_bounded(self) -> None:
+        # Interpret and topology carry the buildable manifest (about 2,300 characters).
         budgets = {
-            "interpret": 5_000,
+            "interpret": 8_000,
             "topology": 8_000,
             "layout": 6_000,
             "population": 11_000,
@@ -145,28 +148,36 @@ class CompanionContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one JSON object"):
             COMPANION.strict_json_loads("[]")
 
-    def test_provider_json_collapses_only_identical_duplicate_values(self) -> None:
-        response, changes = COMPANION.provider_json_loads(
-            '{"stage":"interpret","payload":{"brief":{"id":"same","id":"same"}}}'
-        )
-        self.assertEqual(response["payload"]["brief"]["id"], "same")
-        self.assertEqual(changes, ["Collapsed identical duplicate JSON key 'id'."])
-        with self.assertRaisesRegex(ValueError, "conflicting duplicate JSON key"):
-            COMPANION.provider_json_loads(
-                '{"stage":"interpret","stage":"repair"}'
-            )
+    def test_provider_schema_is_strict_and_closed(self) -> None:
+        def walk(node: object, path: str) -> None:
+            if isinstance(node, list):
+                for index, item in enumerate(node):
+                    walk(item, f"{path}[{index}]")
+                return
+            if not isinstance(node, dict):
+                return
+            for keyword in COMPANION.PROVIDER_SCHEMA_DROPPED_KEYWORDS | {"oneOf"}:
+                self.assertNotIn(keyword, node, path)
+            if node.get("type") == "object" and "properties" in node:
+                self.assertIs(node.get("additionalProperties"), False, path)
+                self.assertEqual(sorted(node["required"]), sorted(node["properties"]), path)
+            for key, child in node.items():
+                walk(child, f"{path}.{key}")
 
-    def test_provider_json_removes_only_bounded_dangling_property_marker(self) -> None:
-        response, changes = COMPANION.provider_json_loads(
-            '{"stage":"interpret","payload":{"brief":{"id":"same","}}}'
-        )
-        self.assertEqual(response["payload"]["brief"]["id"], "same")
-        self.assertEqual(
-            changes,
-            ["Removed dangling quoted property marker before object close."],
-        )
-        with self.assertRaises(json.JSONDecodeError):
-            COMPANION.provider_json_loads('{"stage" "interpret"}')
+        for stage in ("interpret", "topology", "repair"):
+            with self.subTest(stage=stage):
+                request = integrated_request_for(stage)
+                request["repairTargets"] = [{"section": "locations", "index": 0}]
+                walk(COMPANION.provider_output_schema(COMPANION.stage_response_schema(request)), "$")
+
+    def test_prompt_omits_schema_when_provider_enforces_it(self) -> None:
+        request = integrated_request_for("topology")
+        with_schema = COMPANION.build_agent_prompt(request)
+        without_schema = COMPANION.build_agent_prompt(request, include_schema=False)
+        self.assertIn("Stage-specific JSON Schema", with_schema)
+        self.assertNotIn("Stage-specific JSON Schema", without_schema)
+        self.assertLess(len(without_schema), len(with_schema) - 3000)
+        self.assertIn("brief.landform", COMPANION.build_agent_prompt(request_for("interpret")))
 
     def test_layout_response_must_choose_one_supplied_candidate(self) -> None:
         request = request_for("layout")
@@ -376,7 +387,8 @@ class CompanionContractTests(unittest.TestCase):
         request = request_for("interpret")
         request["providerMode"] = "cli"
         request["providerMaxAttempts"] = 2
-        request["companionTimeoutSeconds"] = 10
+        # A corrective retry needs at least MINIMUM_RETRY_SECONDS of budget left.
+        request["companionTimeoutSeconds"] = 60
         valid = COMPANION.fixture_response(request)
         previous = os.environ.get("WORLD_DIRECTOR_CLI_COMMAND")
         with tempfile.TemporaryDirectory() as directory:
@@ -471,19 +483,196 @@ class CompanionContractTests(unittest.TestCase):
     def test_local_population_synthesis_is_bounded_and_semantically_valid(self) -> None:
         request = integrated_request_for("population")
         response = COMPANION.synthesized_population_response(request)
-        self.assertEqual(len(response["payload"]["residents"]), 20)
+        payload = response["payload"]
+        self.assertGreaterEqual(len(payload["residents"]), 20)
+        self.assertLessEqual(len(payload["residents"]), 30)
         self.assertEqual(response["diagnostics"]["inputTokens"], 0)
-        self.assertLess(len(json.dumps(response).encode("utf-8")), COMPANION.MAX_RESPONSE_BYTES)
         COMPANION.validate_population_semantics(request, response)
 
-        payload = response["payload"]
         secret_fact_ids = {fact["id"] for fact in request["current"]["facts"] if fact["bSecret"]}
         covered_fact_ids = {belief["factId"] for belief in payload["beliefs"]}
         self.assertLessEqual(secret_fact_ids, covered_fact_ids)
-        self.assertGreater(len({resident["displayName"] for resident in payload["residents"]}), 1)
-        self.assertGreater(len({resident["occupationTag"] for resident in payload["residents"]}), 1)
-        self.assertGreater(len({resident["motivation"] for resident in payload["residents"]}), 1)
-        self.assertGreater(len(covered_fact_ids), 1)
+        self.assertEqual(
+            len({resident["displayName"] for resident in payload["residents"]}),
+            len(payload["residents"]),
+        )
+        occupations = [resident["occupationTag"] for resident in payload["residents"]]
+        self.assertEqual(occupations.count("Occupation.Reeve"), 1)
+        self.assertGreaterEqual(len(set(occupations)), 3)
+        self.assertGreaterEqual(
+            len({item["relationshipType"] for item in payload["relationships"]}), 3
+        )
+        self.assertTrue(payload["events"])
+
+    def test_population_synthesis_follows_each_real_topology(self) -> None:
+        corpus = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))["entries"]
+        signatures = set()
+        for entry in corpus:
+            with self.subTest(run=entry["runId"]):
+                topology_request = integrated_request_for("topology")
+                topology_request["seed"] = entry["seed"]
+                topology_request["current"]["brief"] = entry["brief"]
+                topology = {"stage": "topology", "payload": json.loads(json.dumps(entry["topology"]))}
+                topology, _ = COMPANION.normalize_and_validate_stage_response(topology_request, topology)
+                request = integrated_request_for("population")
+                request["seed"] = entry["seed"]
+                request["current"].update({
+                    "brief": entry["brief"],
+                    **{key: topology["payload"][key] for key in ("topology", "locations", "facts", "threats")},
+                })
+                response = COMPANION.synthesized_population_response(request)
+                COMPANION.validate_population_semantics(request, response)
+                payload = response["payload"]
+                self.assertLess(len(json.dumps(response, separators=(",", ":"))), 256_000)
+                names = [resident["displayName"] for resident in payload["residents"]]
+                self.assertFalse(any(
+                    word in name.lower()
+                    for name in names
+                    for word in ("generated", "authority", "council", "resident")
+                ))
+                signatures.add(tuple(sorted(names)))
+                motivations = {resident["motivation"] for resident in payload["residents"]}
+                self.assertGreater(len(motivations), len(payload["residents"]) // 2)
+        self.assertEqual(len(signatures), len(corpus))
+
+    def test_topology_requires_the_full_slice_location_mix(self) -> None:
+        request = integrated_request_for("topology")
+        response = COMPANION.fixture_response(request)
+        for location in response["payload"]["locations"]:
+            if location["purposeTag"] == "Purpose.Landmark":
+                location["purposeTag"] = "Purpose.Workplace"
+        with self.assertRaisesRegex(ValueError, "Purpose.Landmark"):
+            COMPANION.normalize_and_validate_stage_response(request, response)
+
+        response = COMPANION.fixture_response(request)
+        landmark = next(
+            item["id"] for item in response["payload"]["locations"]
+            if item["purposeTag"] == "Purpose.Landmark"
+        )
+        response["payload"]["topology"]["landmarkLocationIds"] = ["location.missing"]
+        for location in response["payload"]["locations"]:
+            location["accessPolicy"] = "Residents"
+        response, changes = COMPANION.normalize_and_validate_stage_response(request, response)
+        self.assertEqual(response["payload"]["topology"]["landmarkLocationIds"][0], landmark)
+        self.assertTrue(any("public" in change for change in changes))
+
+    def test_interpret_requires_a_supported_landform(self) -> None:
+        request = request_for("interpret")
+        response = COMPANION.fixture_response(request)
+        self.assertIn(response["payload"]["brief"]["landform"], COMPANION.LANDFORMS)
+        response["payload"]["brief"]["landform"] = "volcano"
+        with self.assertRaisesRegex(ValueError, "not one of the allowed choices|landform"):
+            COMPANION.normalize_and_validate_stage_response(request, response)
+
+    def test_interpret_requires_a_supported_presentation(self) -> None:
+        request = request_for("interpret")
+        response = COMPANION.fixture_response(request)
+        self.assertEqual(response["payload"]["brief"]["presentation"], COMPANION.PRESENTATION_DEFAULTS)
+        response["payload"]["brief"]["presentation"]["fortification"] = "castle"
+        with self.assertRaisesRegex(ValueError, "not one of the allowed choices|fortification"):
+            COMPANION.normalize_and_validate_stage_response(request, response)
+
+    def test_briefs_without_presentation_get_the_defaults(self) -> None:
+        request = request_for("interpret")
+        response = COMPANION.fixture_response(request)
+        del response["payload"]["brief"]["presentation"]
+        normalized, changes = COMPANION.normalize_and_validate_stage_response(request, response)
+        self.assertEqual(normalized["payload"]["brief"]["presentation"], COMPANION.PRESENTATION_DEFAULTS)
+        self.assertTrue(any("presentation" in change for change in changes))
+
+    def test_presentation_options_match_the_schema(self) -> None:
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        properties = schema["$defs"]["WorldPresentation"]["properties"]
+        self.assertEqual(sorted(properties), sorted(COMPANION.PRESENTATION_OPTIONS))
+        for name, options in COMPANION.PRESENTATION_OPTIONS.items():
+            self.assertEqual(properties[name]["enum"], list(options), name)
+
+    def test_fallback_manifest_offers_exactly_the_schema_options(self) -> None:
+        manifest = COMPANION.DEFAULT_BUILDABLE_MANIFEST["presentation"]
+        self.assertEqual(sorted(manifest), sorted(COMPANION.PRESENTATION_OPTIONS))
+        for name, options in COMPANION.PRESENTATION_OPTIONS.items():
+            self.assertEqual(list(manifest[name]), list(options), name)
+        prompt = COMPANION.build_agent_prompt(request_for("interpret"), include_schema=False)
+        self.assertIn("stockade", prompt)
+        self.assertIn("notAvailable", prompt)
+
+    def test_buildable_manifest_reaches_only_the_stages_that_build(self) -> None:
+        buildable = {
+            "presentation": {"fortification": {"stockade": "PRESENTATION_MARKER"}},
+            "buildings": [{"building": "Watermill", "when": "BUILDINGS_MARKER"}],
+            "notAvailable": "NOT_AVAILABLE_MARKER",
+        }
+        expected = {
+            "interpret": {"PRESENTATION_MARKER", "NOT_AVAILABLE_MARKER"},
+            "topology": {"BUILDINGS_MARKER", "NOT_AVAILABLE_MARKER"},
+            "repair": set(),
+            "population": set(),
+        }
+        markers = {"PRESENTATION_MARKER", "BUILDINGS_MARKER", "NOT_AVAILABLE_MARKER"}
+        for stage, present in expected.items():
+            with self.subTest(stage=stage):
+                request = integrated_request_for(stage)
+                request["capabilitySummary"]["buildable"] = buildable
+                prompt = COMPANION.build_agent_prompt(request, include_schema=False)
+                for marker in markers:
+                    if marker in present:
+                        self.assertIn(marker, prompt)
+                    else:
+                        self.assertNotIn(marker, prompt)
+
+    def test_model_choice_is_checked_against_the_codex_catalog(self) -> None:
+        previous = os.environ.get("CODEX_HOME")
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "models_cache.json").write_text(json.dumps({"models": [
+                {"slug": "model-current", "supported_reasoning_levels": [
+                    {"effort": "low"}, {"effort": "medium"}]},
+            ]}), encoding="utf-8")
+            os.environ["CODEX_HOME"] = directory
+            try:
+                COMPANION.validate_model_choice("model-current", "medium")
+                with self.assertRaisesRegex(ValueError, "not in the installed Codex model catalog"):
+                    COMPANION.validate_model_choice("model-retired", "medium")
+                with self.assertRaisesRegex(ValueError, "does not support reasoning effort"):
+                    COMPANION.validate_model_choice("model-current", "max")
+            finally:
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
+
+    def test_configured_provider_receives_the_output_schema(self) -> None:
+        request = request_for("interpret")
+        request["providerMode"] = "cli"
+        request["companionTimeoutSeconds"] = 10
+        valid = COMPANION.fixture_response(request)
+        previous = os.environ.get("WORLD_DIRECTOR_CLI_COMMAND")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            response_path = root / "valid.json"
+            response_path.write_text(json.dumps(valid), encoding="utf-8")
+            schema_copy = root / "schema-seen.json"
+            script = root / "schema_provider.py"
+            script.write_text(
+                "from pathlib import Path\nimport shutil, sys\n"
+                "shutil.copy(sys.argv[1], sys.argv[2])\n"
+                "Path(sys.argv[4]).write_text(Path(sys.argv[3]).read_text())\n",
+                encoding="utf-8",
+            )
+            os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = (
+                f"{sys.executable} {script} {{schema}} {schema_copy} {response_path} {{output}}"
+            )
+            try:
+                response = COMPANION.cli_response(request, root / "interpret-response.json")
+                self.assertTrue(response["diagnostics"]["structuredOutput"])
+                schema = json.loads(schema_copy.read_text(encoding="utf-8"))
+                self.assertEqual(schema["properties"]["stage"]["const"], "interpret")
+                prompt = (root / "interpret-prompt.txt").read_text(encoding="utf-8")
+                self.assertNotIn("Stage-specific JSON Schema", prompt)
+            finally:
+                if previous is None:
+                    os.environ.pop("WORLD_DIRECTOR_CLI_COMMAND", None)
+                else:
+                    os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = previous
 
     def test_population_bundle_repair_replaces_every_coupled_section(self) -> None:
         request = integrated_request_for("repair")
@@ -497,6 +686,33 @@ class CompanionContractTests(unittest.TestCase):
             set(COMPANION.STAGE_KEYS["population"]),
         )
         self.assertLess(len(json.dumps(response).encode("utf-8")), COMPANION.MAX_RESPONSE_BYTES)
+
+    def test_corrective_retry_is_skipped_when_the_budget_cannot_fit_it(self) -> None:
+        request = request_for("interpret")
+        request["providerMode"] = "cli"
+        request["providerMaxAttempts"] = 2
+        request["companionTimeoutSeconds"] = 10
+        previous = os.environ.get("WORLD_DIRECTOR_CLI_COMMAND")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "bad_provider.py"
+            counter = root / "count.txt"
+            script.write_text(
+                "from pathlib import Path\nimport sys\n"
+                "c = Path(sys.argv[1]); c.write_text(str(int(c.read_text() or 0) + 1) if c.exists() else '1')\n"
+                "Path(sys.argv[2]).write_text('{\"stage\":\"interpret\",\"stage\":\"repair\"}')\n",
+                encoding="utf-8",
+            )
+            os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = f"{sys.executable} {script} {counter} {{output}}"
+            try:
+                with self.assertRaisesRegex(RuntimeError, "not enough for a corrective retry"):
+                    COMPANION.cli_response(request, root / "interpret-response.json")
+                self.assertEqual(counter.read_text(encoding="utf-8"), "1")
+            finally:
+                if previous is None:
+                    os.environ.pop("WORLD_DIRECTOR_CLI_COMMAND", None)
+                else:
+                    os.environ["WORLD_DIRECTOR_CLI_COMMAND"] = previous
 
     def test_cli_timeout_writes_bounded_telemetry(self) -> None:
         request = request_for("interpret")

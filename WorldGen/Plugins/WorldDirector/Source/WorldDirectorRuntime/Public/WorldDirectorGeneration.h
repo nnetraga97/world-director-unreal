@@ -168,3 +168,27 @@ public:
 };
 
 WORLDDIRECTORRUNTIME_API TSharedRef<IWorldDirectorProvider> CreateWorldDirectorLocalCompanionProvider();
+
+/** A model the installed Codex CLI currently serves, read from its own model catalog. */
+struct FWorldDirectorModelOption
+{
+	FString Slug;
+	FString DisplayName;
+	FString Description;
+	/** Reasoning efforts offered for world generation (the catalog's levels, capped at "high"). */
+	TArray<FString> ReasoningEfforts;
+	FString DefaultReasoningEffort;
+};
+
+/**
+ * Lists visible models from $CODEX_HOME/models_cache.json (default ~/.codex). Model names
+ * change between Codex releases; hardcoding them is what left the menu offering retired
+ * models. Returns an empty array when Codex has not cached a catalog yet.
+ */
+WORLDDIRECTORRUNTIME_API TArray<FWorldDirectorModelOption> LoadWorldDirectorModelCatalog();
+
+/** [WorldDirector] DefaultModel from Game config if Codex serves it, else the first catalog model. */
+WORLDDIRECTORRUNTIME_API FString GetWorldDirectorDefaultModel();
+
+/** [WorldDirector] DefaultReasoningEffort if the model supports it, else the model's own default. */
+WORLDDIRECTORRUNTIME_API FString GetWorldDirectorDefaultReasoningEffort(const FString& Model);

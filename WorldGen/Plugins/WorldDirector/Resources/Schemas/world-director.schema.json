@@ -25,10 +25,26 @@
         "Preparation", "Transition", "Active", "Delayed", "Refused", "Failed"
       ]
     },
+    "WorldPresentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fortification", "waterLife", "justice", "fire", "timeOfDay", "weather", "season", "roofPalette", "authorityColor"],
+      "properties": {
+        "fortification": { "type": "string", "enum": ["open", "fenced", "palisade", "stockade"] },
+        "waterLife": { "type": "string", "enum": ["none", "fishing", "harbor"] },
+        "justice": { "type": "string", "enum": ["lenient", "stern", "grim"] },
+        "fire": { "type": "string", "enum": ["hearths", "braziers", "vigil", "smouldering"] },
+        "timeOfDay": { "type": "string", "enum": ["dawn", "morning", "midday", "dusk", "night"] },
+        "weather": { "type": "string", "enum": ["clear", "overcast", "misty", "stormy"] },
+        "season": { "type": "string", "enum": ["summer", "spring", "autumn"] },
+        "roofPalette": { "type": "string", "enum": ["natural", "weathered", "sooty", "ochre", "slate", "moss"] },
+        "authorityColor": { "type": "string", "enum": ["natural", "crimson", "azure", "gold", "verdant", "black"] }
+      }
+    },
     "WorldBrief": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "id", "theme", "settlementIdentity", "playerPrompt", "premises", "terrainPreferences", "requiredCapabilityTags"],
+      "required": ["version", "id", "theme", "settlementIdentity", "playerPrompt", "premises", "landform", "presentation", "terrainPreferences", "requiredCapabilityTags"],
       "properties": {
         "version": { "$ref": "#/$defs/Version" },
         "id": { "$ref": "#/$defs/StableId" },
@@ -36,6 +52,8 @@
         "settlementIdentity": { "type": "string", "minLength": 1 },
         "playerPrompt": { "type": "string" },
         "premises": { "type": "array", "items": { "type": "string" } },
+        "landform": { "type": "string", "enum": ["basin", "valley", "ridge", "coast", "marsh"] },
+        "presentation": { "$ref": "#/$defs/WorldPresentation" },
         "terrainPreferences": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
         "requiredCapabilityTags": { "type": "array", "items": { "$ref": "#/$defs/MechanicalTag" }, "uniqueItems": true }
       }

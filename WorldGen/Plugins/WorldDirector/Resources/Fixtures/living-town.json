@@ -12,6 +12,8 @@
       "Six households share the river mill and gather nightly at the frontier hall.",
       "Private stores, debts, remedies, and old civic traditions shape what residents tell one another."
     ],
+    "landform": "basin",
+    "presentation": {"fortification": "open", "waterLife": "none", "justice": "lenient", "fire": "hearths", "timeOfDay": "dawn", "weather": "clear", "season": "summer", "roofPalette": "natural", "authorityColor": "natural"},
     "terrainPreferences": ["Flat river basin", "Walkable household ring", "Raised civic landmark"],
     "requiredCapabilityTags": [
       "Capability.Interior",

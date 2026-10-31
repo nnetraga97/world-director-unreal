@@ -22,6 +22,11 @@
 #include "LandscapeProxy.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
+#include "Engine/CollisionProfile.h"
+#include "Kismet/GameplayStatics.h"
+#include "Particles/ParticleSystem.h"
+#include "Particles/ParticleSystemComponent.h"
+#include "WorldDirectorPresentation.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
@@ -56,6 +61,9 @@
 #include "WorldDirectorPhysicalGenerator.h"
 #include "WorldDirectorSubsystems.h"
 #include "WorldEnvironmentProfile.h"
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 namespace
 {
@@ -410,6 +418,14 @@ void AWorldDirectorTownActor::DestroyCompiledContent()
 		Location->Destroy();
 	}
 	SpawnedLocations.Reset();
+	for (AActor* Feature : FeatureActors)
+	{
+		if (Feature != nullptr)
+		{
+			Feature->Destroy();
+		}
+	}
+	FeatureActors.Reset();
 	for (ALandscapeProxy* Landscape : HiddenAuthoredLandscapes)
 	{
 		if (Landscape != nullptr)
@@ -1577,7 +1593,9 @@ void AWorldDirectorTownActor::BuildDressing(
 	const FResolvedWorldPlan& Plan,
 	FValidationReport& OutReport)
 {
-	TMap<UStaticMesh*, TArray<FTransform>> TransformsByMesh;
+	// Keyed by mesh and solidity: palisade walls and towers collide and cut the navmesh,
+	// everything else stays decorative.
+	TMap<TPair<UStaticMesh*, bool>, TArray<FTransform>> TransformsByMesh;
 	for (int32 Index = 0; Index < Plan.Dressing.Num(); ++Index)
 	{
 		const FWorldDirectorDressingInstance& Instance = Plan.Dressing[Index];
@@ -1587,12 +1605,14 @@ void AWorldDirectorTownActor::BuildDressing(
 			OutReport.AddError(TEXT("generator.dressing_asset_missing"), FString::Printf(TEXT("dressing[%d]"), Index), Instance.MeshAsset.ToString());
 			continue;
 		}
-		TransformsByMesh.FindOrAdd(Mesh).Add(Instance.Transform);
+		const bool bSolid = Instance.BiomeTag.ToString().Contains(TEXT("Solid"));
+		TransformsByMesh.FindOrAdd(TPair<UStaticMesh*, bool>(Mesh, bSolid)).Add(Instance.Transform);
 	}
 
-	for (TPair<UStaticMesh*, TArray<FTransform>>& Pair : TransformsByMesh)
+	for (TPair<TPair<UStaticMesh*, bool>, TArray<FTransform>>& Pair : TransformsByMesh)
 	{
-		UStaticMesh* Mesh = Pair.Key;
+		UStaticMesh* Mesh = Pair.Key.Key;
+		const bool bSolid = Pair.Key.Value;
 		const FString MeshName = Mesh->GetName().ToUpper();
 		int32 StartCullDistance = 28000;
 		int32 EndCullDistance = 78000;
@@ -1617,15 +1637,23 @@ void AWorldDirectorTownActor::BuildDressing(
 			StartCullDistance = 25000;
 			EndCullDistance = 68000;
 		}
-		TObjectPtr<UHierarchicalInstancedStaticMeshComponent>& ComponentPtr =
-			DressingInstanceComponents.FindOrAdd(Mesh);
+		TObjectPtr<UHierarchicalInstancedStaticMeshComponent>& ComponentPtr = bSolid
+			? SolidDressingInstanceComponents.FindOrAdd(Mesh) : DressingInstanceComponents.FindOrAdd(Mesh);
 		if (ComponentPtr == nullptr)
 		{
 			ComponentPtr = NewObject<UHierarchicalInstancedStaticMeshComponent>(this);
 			UHierarchicalInstancedStaticMeshComponent* Component = ComponentPtr.Get();
 			Component->SetStaticMesh(Mesh);
-			Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			Component->SetCanEverAffectNavigation(false);
+			if (bSolid)
+			{
+				Component->SetCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
+				Component->SetCanEverAffectNavigation(true);
+			}
+			else
+			{
+				Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				Component->SetCanEverAffectNavigation(false);
+			}
 			Component->SetCullDistances(StartCullDistance, EndCullDistance);
 			Component->SetMobility(GetRootComponent()->Mobility);
 			Component->SetCastShadow(!Mesh->GetName().Contains(TEXT("PLANT"), ESearchCase::IgnoreCase));
@@ -1640,13 +1668,16 @@ void AWorldDirectorTownActor::BuildDressing(
 }
 
 UInstancedStaticMeshComponent* AWorldDirectorTownActor::FindOrCreateInstanceComponent(
-	UStaticMeshComponent* Source)
+	UStaticMeshComponent* Source,
+	const bool bAuthority)
 {
 	if (Source == nullptr || Source->GetStaticMesh() == nullptr)
 	{
 		return nullptr;
 	}
-	if (TObjectPtr<UInstancedStaticMeshComponent>* Existing = WorldDirectorInstanceComponents.Find(Source->GetStaticMesh()))
+	TMap<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>>& Components =
+		bAuthority ? AuthorityInstanceComponents : WorldDirectorInstanceComponents;
+	if (TObjectPtr<UInstancedStaticMeshComponent>* Existing = Components.Find(Source->GetStaticMesh()))
 	{
 		return Existing->Get();
 	}
@@ -1660,11 +1691,178 @@ UInstancedStaticMeshComponent* AWorldDirectorTownActor::FindOrCreateInstanceComp
 	Instances->SetupAttachment(GetRootComponent());
 	AddInstanceComponent(Instances);
 	Instances->RegisterComponent();
-	WorldDirectorInstanceComponents.Add(Source->GetStaticMesh(), Instances);
+	Components.Add(Source->GetStaticMesh(), Instances);
 	return Instances;
 }
 
-void AWorldDirectorTownActor::CollapseActorToInstances(AActor* SourceActor)
+void AWorldDirectorTownActor::BuildFeatures(
+	const FResolvedWorldPlan& Plan,
+	FValidationReport& OutReport)
+{
+	UWorld* World = GetWorld();
+	for (int32 Index = 0; World != nullptr && Index < Plan.Features.Num(); ++Index)
+	{
+		const FWorldDirectorFeatureInstance& Feature = Plan.Features[Index];
+		UObject* Asset = Feature.Asset.TryLoad();
+		if (UClass* FeatureClass = Cast<UClass>(Asset))
+		{
+			FActorSpawnParameters Parameters;
+			Parameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+			AActor* Actor = World->SpawnActor<AActor>(FeatureClass, Feature.Transform, Parameters);
+			if (Actor == nullptr)
+			{
+				OutReport.AddError(TEXT("generator.feature_spawn_failed"), FString::Printf(TEXT("features[%d]"), Index), Feature.Asset.ToString());
+				continue;
+			}
+			// Braziers and campfires are scenery: never let one block a doorway path.
+			Actor->SetActorEnableCollision(false);
+			TArray<UPrimitiveComponent*> Primitives;
+			Actor->GetComponents(Primitives);
+			for (UPrimitiveComponent* Primitive : Primitives)
+			{
+				Primitive->SetCanEverAffectNavigation(false);
+			}
+			Actor->AttachToActor(this, FAttachmentTransformRules::KeepWorldTransform);
+			FeatureActors.Add(Actor);
+		}
+		else if (UParticleSystem* System = Cast<UParticleSystem>(Asset))
+		{
+			UGameplayStatics::SpawnEmitterAttached(System, GetRootComponent(), NAME_None,
+				Feature.Transform.GetLocation(), Feature.Transform.Rotator(), Feature.Transform.GetScale3D(),
+				EAttachLocation::KeepWorldPosition, false);
+		}
+		else
+		{
+			OutReport.AddError(TEXT("generator.feature_asset_missing"), FString::Printf(TEXT("features[%d]"), Index), Feature.Asset.ToString());
+		}
+	}
+}
+
+void AWorldDirectorTownActor::ApplyPresentationMaterials(const FResolvedWorldPlan& Plan)
+{
+	const FWorldPresentation& Presentation = Plan.Presentation;
+	const FWorldDirectorPresentation::FRoofLook TownRoof = FWorldDirectorPresentation::RoofLook(Presentation.RoofPalette);
+	const FWorldDirectorPresentation::FRoofLook AuthorityRoof = FWorldDirectorPresentation::AuthorityRoofLook(Presentation);
+	const FLinearColor FoliageTint = FWorldDirectorPresentation::FoliageTint(Presentation.Season);
+	// Pack wind parameters (defaults: speed 1, influence 1, weight 0.25).
+	float WindSpeed = 1.0f;
+	float WindInfluence = 1.0f;
+	float WindWeight = 0.25f;
+	if (Presentation.Weather == TEXT("overcast"))
+	{
+		WindSpeed = 1.4f; WindWeight = 0.32f;
+	}
+	else if (Presentation.Weather == TEXT("misty"))
+	{
+		WindSpeed = 0.6f; WindWeight = 0.18f;
+	}
+	else if (Presentation.Weather == TEXT("stormy"))
+	{
+		WindSpeed = 2.8f; WindInfluence = 1.8f; WindWeight = 0.55f;
+	}
+	const bool bWind = Presentation.Weather != TEXT("clear");
+	auto SourceName = [](UMaterialInterface* Material)
+	{
+		if (UMaterialInstanceDynamic* Dynamic = Cast<UMaterialInstanceDynamic>(Material); Dynamic != nullptr && Dynamic->Parent != nullptr)
+		{
+			return Dynamic->Parent->GetName();
+		}
+		return Material != nullptr ? Material->GetName() : FString();
+	};
+	int32 RoofSlots = 0;
+	int32 FoliageSlots = 0;
+	int32 WindSlots = 0;
+	auto Retint = [&](UMeshComponent* Component, const FWorldDirectorPresentation::FRoofLook& Roof)
+	{
+		for (int32 Slot = 0; Component != nullptr && Slot < Component->GetNumMaterials(); ++Slot)
+		{
+			UMaterialInterface* Material = Component->GetMaterial(Slot);
+			const FString Name = SourceName(Material);
+			const bool bRoof = Name.Contains(TEXT("rooftiles")) && !Roof.IsDefault();
+			if (bRoof && Roof.Material != nullptr)
+			{
+				if (UMaterialInterface* PackRoof = Cast<UMaterialInterface>(FSoftObjectPath(Roof.Material).TryLoad()))
+				{
+					Component->SetMaterial(Slot, PackRoof);
+					Material = PackRoof;
+				}
+			}
+			const bool bFoliage = (Name.Contains(TEXT("trees_wind")) || Name.Contains(TEXT("plants_wind")) ||
+				Name.Contains(TEXT("grass_wind"))) && (bWind || !FoliageTint.Equals(FLinearColor::White));
+			const bool bFlag = Name.Contains(TEXT("flags_wind")) && bWind;
+			if (!bRoof && !bFoliage && !bFlag)
+			{
+				continue;
+			}
+			if (bRoof && !bFoliage && !bFlag && Roof.Tint.Equals(FLinearColor::White))
+			{
+				++RoofSlots;
+				continue;
+			}
+			UMaterialInstanceDynamic* Dynamic = Cast<UMaterialInstanceDynamic>(Material);
+			if (Dynamic == nullptr)
+			{
+				Dynamic = Component->CreateDynamicMaterialInstance(Slot, Material);
+			}
+			if (Dynamic == nullptr)
+			{
+				continue;
+			}
+			if (bRoof)
+			{
+				Dynamic->SetVectorParameterValue(TEXT("Base Color Tint"), Roof.Tint);
+				++RoofSlots;
+			}
+			if (bFoliage)
+			{
+				Dynamic->SetVectorParameterValue(TEXT("Base Color Tint"), FoliageTint);
+				++FoliageSlots;
+			}
+			if ((bFoliage || bFlag) && bWind)
+			{
+				Dynamic->SetScalarParameterValue(TEXT("Wind Speed"), WindSpeed);
+				Dynamic->SetScalarParameterValue(TEXT("Wind Influence"), WindInfluence);
+				Dynamic->SetScalarParameterValue(TEXT("Wind Weight"), WindWeight);
+				++WindSlots;
+			}
+		}
+	};
+	for (const TPair<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>>& Pair : WorldDirectorInstanceComponents)
+	{
+		Retint(Pair.Value, TownRoof);
+	}
+	for (const TPair<TObjectPtr<UStaticMesh>, TObjectPtr<UInstancedStaticMeshComponent>>& Pair : AuthorityInstanceComponents)
+	{
+		Retint(Pair.Value, AuthorityRoof);
+	}
+	for (AWorldDirectorLocationActor* Location : SpawnedLocations)
+	{
+		if (Location == nullptr || Location->ShellActor == nullptr)
+		{
+			continue;
+		}
+		const FResolvedLocationPlan* Resolved = Plan.Locations.FindByPredicate(
+			[Location](const FResolvedLocationPlan& Candidate) { return Candidate.LocationId == Location->LocationId; });
+		const bool bAuthority = Resolved != nullptr && (Resolved->LocationId == Plan.LandmarkLocationId ||
+			Resolved->PurposeTag == TEXT("Purpose.Headquarters"));
+		TArray<UStaticMeshComponent*> Components;
+		Location->ShellActor->GetComponents(Components);
+		for (UStaticMeshComponent* Component : Components)
+		{
+			Retint(Component, bAuthority ? AuthorityRoof : TownRoof);
+		}
+	}
+	for (const TPair<TObjectPtr<UStaticMesh>, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>>& Pair : DressingInstanceComponents)
+	{
+		Retint(Pair.Value, FWorldDirectorPresentation::FRoofLook());
+	}
+	UE_LOG(LogWorldDirector, Display,
+		TEXT("WORLD_DIRECTOR_PRESENTATION_MATERIALS roofPalette=%s authorityColor=%s season=%s weather=%s roofSlots=%d foliageSlots=%d windSlots=%d features=%d"),
+		*Presentation.RoofPalette, *Presentation.AuthorityColor, *Presentation.Season, *Presentation.Weather,
+		RoofSlots, FoliageSlots, WindSlots, FeatureActors.Num());
+}
+
+void AWorldDirectorTownActor::CollapseActorToInstances(AActor* SourceActor, const bool bAuthority)
 {
 	if (SourceActor == nullptr)
 	{
@@ -1679,7 +1877,7 @@ void AWorldDirectorTownActor::CollapseActorToInstances(AActor* SourceActor)
 		{
 			continue;
 		}
-		if (UInstancedStaticMeshComponent* Instances = FindOrCreateInstanceComponent(Component))
+		if (UInstancedStaticMeshComponent* Instances = FindOrCreateInstanceComponent(Component, bAuthority))
 		{
 			Instances->AddInstance(Component->GetComponentTransform(), true);
 		}
@@ -1753,6 +1951,7 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 	}
 	BuildRouteSurfaces(Plan);
 	BuildDressing(Plan, OutReport);
+	BuildFeatures(Plan, OutReport);
 	int32 CollisionTriangleCount = 0;
 	for (int32 SectionIndex = 0; SectionIndex < TerrainMesh->GetNumSections(); ++SectionIndex)
 	{
@@ -1876,8 +2075,10 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 		}
 		if (!Location.bRepurposable)
 		{
-			CollapseActorToInstances(LocationActor->ShellActor);
-			CollapseActorToInstances(LocationActor->InteriorActor);
+			const bool bAuthority = Location.LocationId == Plan.LandmarkLocationId ||
+				Location.PurposeTag == TEXT("Purpose.Headquarters");
+			CollapseActorToInstances(LocationActor->ShellActor, bAuthority);
+			CollapseActorToInstances(LocationActor->InteriorActor, bAuthority);
 			LocationActor->ShellActor = nullptr;
 			LocationActor->InteriorActor = nullptr;
 		}
@@ -1944,6 +2145,7 @@ bool AWorldDirectorTownActor::BuildFromPlan(
 			}
 		}
 	}
+	ApplyPresentationMaterials(Plan);
 	if (Navigation != nullptr)
 	{
 		// Registration may have occurred before the resized bounds request is
@@ -2055,6 +2257,18 @@ bool AWorldDirectorTownActor::BuildActivityStations(
 		}
 	};
 
+	// Workplaces carry residentCapacity 0, so "max(1, capacity)" gave every workplace a
+	// single work slot and most of the town stood in Waiting. Size work stations by the
+	// people actually employed there and meeting space by the whole population.
+	TMap<FString, int32> WorkersByLocation;
+	for (const FResident& Resident : Spec.Residents)
+	{
+		if (Resident.bEmployed && !Resident.WorkplaceLocationId.IsEmpty())
+		{
+			++WorkersByLocation.FindOrAdd(Resident.WorkplaceLocationId);
+		}
+	}
+	const int32 GatheringCapacity = FMath::Max(12, Spec.Residents.Num());
 	for (const FWorldLocation& LocationSpec : Spec.Locations)
 	{
 		const TObjectPtr<AWorldDirectorLocationActor>* LocationPtr = SpawnedLocations.FindByPredicate(
@@ -2078,12 +2292,15 @@ bool AWorldDirectorTownActor::BuildActivityStations(
 			SpawnStations(*Location, TEXT("Activity.Sleep"), FMath::Max(1, LocationSpec.ResidentCapacity));
 			SpawnStations(*Location, TEXT("Activity.Sit"), 2);
 		}
+		const int32 Workers = WorkersByLocation.FindRef(LocationSpec.Id);
 		if (LocationSpec.PurposeTag == TEXT("Purpose.Workplace") ||
 			LocationSpec.PurposeTag == TEXT("Purpose.Landmark") ||
 			LocationSpec.PurposeTag == TEXT("Purpose.Clinic") ||
-			LocationSpec.PurposeTag == TEXT("Purpose.Headquarters"))
+			LocationSpec.PurposeTag == TEXT("Purpose.Headquarters") ||
+			(Workers > 0 && LocationSpec.PurposeTag != TEXT("Purpose.Home")))
 		{
-			SpawnStations(*Location, TEXT("Activity.Work"), FMath::Max(1, LocationSpec.ResidentCapacity));
+			SpawnStations(*Location, TEXT("Activity.Work"),
+				FMath::Max3(1, LocationSpec.ResidentCapacity, Workers));
 			SpawnStations(*Location, TEXT("Activity.Counter"), 2);
 		}
 		if (LocationSpec.PurposeTag == TEXT("Purpose.Shelter") ||
@@ -2092,9 +2309,14 @@ bool AWorldDirectorTownActor::BuildActivityStations(
 			SpawnStations(*Location, TEXT("Activity.Sleep"), FMath::Max(1, LocationSpec.ResidentCapacity));
 			SpawnStations(*Location, TEXT("Activity.Sit"), 2);
 		}
+		if (LocationSpec.PurposeTag == TEXT("Purpose.Shelter"))
+		{
+			// Refuge space for residents sent here by a threat alarm.
+			SpawnStations(*Location, TEXT("Activity.Meet"), GatheringCapacity);
+		}
 		if (Spec.Topology.LandmarkLocationIds.Contains(LocationSpec.Id))
 		{
-			SpawnStations(*Location, TEXT("Activity.Meet"), 12);
+			SpawnStations(*Location, TEXT("Activity.Meet"), GatheringCapacity);
 		}
 	}
 
@@ -2505,9 +2727,9 @@ void AWorldDirectorFixtureBootstrap::BeginPlay()
 		FParse::Value(FCommandLine::Get(), TEXT("WorldDirectorGenerationPrompt="), Prompt);
 		int32 GenerationAutoTestSeed = bAutomatedGenerationPrompted ? 9182 : 4815;
 		FParse::Value(FCommandLine::Get(), TEXT("WorldDirectorGenerationSeed="), GenerationAutoTestSeed);
-		FString GenerationAutoTestModel = TEXT("gpt-5.6-luna");
+		FString GenerationAutoTestModel = GetWorldDirectorDefaultModel();
 		FParse::Value(FCommandLine::Get(), TEXT("WorldDirectorGenerationModel="), GenerationAutoTestModel);
-		FString GenerationAutoTestReasoning = TEXT("high");
+		FString GenerationAutoTestReasoning = GetWorldDirectorDefaultReasoningEffort(GenerationAutoTestModel);
 		FParse::Value(
 			FCommandLine::Get(), TEXT("WorldDirectorGenerationReasoning="), GenerationAutoTestReasoning);
 		const bool bUseCliProvider = FParse::Param(
@@ -2659,6 +2881,9 @@ void AWorldDirectorFixtureBootstrap::RefreshSavedWorldCatalog()
 	}
 
 	const FString RunsDirectory = WorldDirectorRunsDirectory();
+	const bool bIncludeFixtureWorlds =
+		FParse::Param(FCommandLine::Get(), TEXT("WorldDirectorSavedWorldAutoTest")) ||
+		FParse::Param(FCommandLine::Get(), TEXT("WorldDirectorShowFixtureWorlds"));
 	TArray<FString> RecipePaths;
 	IFileManager::Get().FindFilesRecursive(
 		RecipePaths, *RunsDirectory, TEXT("06-resolved-world-v3.json"), true, false);
@@ -2697,6 +2922,21 @@ void AWorldDirectorFixtureBootstrap::RefreshSavedWorldCatalog()
 		}
 
 		const FString RunId = FPaths::GetCleanFilename(FPaths::GetPath(RecipePath));
+		// Offline fixture runs are test artifacts, not worlds a player created.
+		FString SummaryJson;
+		if (!bIncludeFixtureWorlds && FFileHelper::LoadFileToString(
+				SummaryJson, *FPaths::Combine(FPaths::GetPath(RecipePath), TEXT("run-summary.json"))))
+		{
+			TSharedPtr<FJsonObject> Summary;
+			const TSharedRef<TJsonReader<>> SummaryReader = TJsonReaderFactory<>::Create(SummaryJson);
+			FString ProviderModel;
+			if (FJsonSerializer::Deserialize(SummaryReader, Summary) && Summary.IsValid() &&
+				Summary->TryGetStringField(TEXT("providerModel"), ProviderModel) &&
+				ProviderModel == TEXT("deterministic fixture"))
+			{
+				continue;
+			}
+		}
 		FString SettlementIdentity = Spec.Brief.SettlementIdentity.TrimStartAndEnd();
 		if (SettlementIdentity.IsEmpty())
 		{
@@ -3227,6 +3467,10 @@ void AWorldDirectorFixtureBootstrap::HandlePlayerGenerationFinished(
 		CreateWorldWidget->SetGenerationResult(bPlayable, ResultError);
 	}
 	CloseLoadingScreen();
+	if (bPlayable)
+	{
+		BeginPlayabilityProbe();
+	}
 	if (bPlayable && !bPlayerFlowAutoTest)
 	{
 		CloseWorldCreationMenu();
@@ -3282,11 +3526,23 @@ bool AWorldDirectorFixtureBootstrap::CompileGeneratedWorld()
 		!TerrainOverride.TrimStartAndEnd().IsEmpty())
 	{
 		Spec.Brief.TerrainPreferences = {TerrainOverride.TrimStartAndEnd()};
+		// brief.landform wins over prose, so a landform name overrides it directly and any
+		// other text falls back to the prose path.
+		Spec.Brief.Landform = FWorldDirectorPhysicalGenerator::TryParseLandform(TerrainOverride.TrimStartAndEnd(), nullptr)
+			? TerrainOverride.TrimStartAndEnd().ToLower() : FString();
 		UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_TERRAIN_OVERRIDE=%s"), *TerrainOverride);
 	}
 	FResolvedWorldPlan Plan;
 	LastCompilationReport = FValidationReport();
-	if (!Generation->ResolveWorldSpec(Spec, Plan, LastCompilationReport))
+	// Integration already resolved (and persisted) this exact spec with asset loading.
+	// Reuse it instead of running the full physical generator a third time.
+	const FResolvedWorldPlan& IntegratedPlan = Bridge->GetLastResolvedWorldPlan();
+	if (TerrainOverride.IsEmpty() && !IntegratedPlan.WorldFingerprint.IsEmpty() &&
+		IntegratedPlan.SourceSpecId == Spec.Id && IntegratedPlan.Seed == Spec.Seed)
+	{
+		Plan = IntegratedPlan;
+	}
+	else if (!Generation->ResolveWorldSpec(Spec, Plan, LastCompilationReport))
 	{
 		Bridge->RecordRuntimeCompilationMetric(false,
 			FPlatformTime::Seconds() - CompileStartedAt, 0, 0,
@@ -3336,6 +3592,72 @@ bool AWorldDirectorFixtureBootstrap::CompileGeneratedWorld()
 		FPlatformTime::Seconds() - CompileStartedAt,
 		SpawnedTown->SpawnedLocations.Num(), SpawnedTown->SpawnedResidents.Num(), FString());
 	return true;
+}
+
+void AWorldDirectorFixtureBootstrap::BeginPlayabilityProbe()
+{
+	PlayabilityProbeStartedAt = FPlatformTime::Seconds();
+	GetWorldTimerManager().SetTimer(
+		PlayabilityProbeHandle, this, &AWorldDirectorFixtureBootstrap::ContinuePlayabilityProbe, 1.0f, false);
+}
+
+void AWorldDirectorFixtureBootstrap::ContinuePlayabilityProbe()
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr || CompiledTown == nullptr)
+	{
+		return;
+	}
+	const double Waited = FPlatformTime::Seconds() - PlayabilityProbeStartedAt;
+	const bool bBuilding = UNavigationSystemV1::IsNavigationBeingBuilt(World);
+	if (bBuilding && Waited < 90.0)
+	{
+		GetWorldTimerManager().SetTimer(
+			PlayabilityProbeHandle, this, &AWorldDirectorFixtureBootstrap::ContinuePlayabilityProbe, 1.0f, false);
+		return;
+	}
+	if (UDirectorBridgeSubsystem* Bridge = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UDirectorBridgeSubsystem>() : nullptr)
+	{
+		Bridge->RecordPlayability(BuildPlayabilityRecord(!bBuilding, Waited));
+	}
+}
+
+FWorldDirectorPlayabilityRecord AWorldDirectorFixtureBootstrap::BuildPlayabilityRecord(
+	const bool bNavigationBuilt,
+	const double NavigationWaitSeconds) const
+{
+	FWorldDirectorPlayabilityRecord Record;
+	Record.bNavigationBuilt = bNavigationBuilt;
+	Record.NavigationWaitSeconds = NavigationWaitSeconds;
+	if (CompiledTown == nullptr)
+	{
+		Record.NavigationIssues.Add(TEXT("town.missing No compiled town is present."));
+		return Record;
+	}
+	const FValidationReport Report = CompiledTown->ValidateNavigationViability();
+	Record.bNavigationViable = bNavigationBuilt && Report.bValid;
+	for (const FValidationIssue& Issue : Report.Issues)
+	{
+		if (Record.NavigationIssues.Num() >= 20)
+		{
+			break;
+		}
+		Record.NavigationIssues.Add(FString::Printf(TEXT("%s %s: %s"),
+			*Issue.Code.ToString(), *Issue.Path, *Issue.Message));
+	}
+	Record.SpawnedLocations = CompiledTown->SpawnedLocations.Num();
+	Record.SpawnedResidents = CompiledTown->SpawnedResidents.Num();
+	Record.TerrainArchetype = StaticEnum<EWorldDirectorTerrainArchetype>()->GetNameStringByValue(
+		static_cast<int64>(CompiledTown->GetCompiledPlan().Terrain.Archetype));
+	if (const UChangeProjectSubsystem* Projects = GetWorld()
+		? GetWorld()->GetSubsystem<UChangeProjectSubsystem>() : nullptr;
+		Projects != nullptr && !Projects->GetProjects().IsEmpty())
+	{
+		Record.ProjectState = StaticEnum<EWorldDirectorProjectState>()->GetNameStringByValue(
+			static_cast<int64>(Projects->GetProjects()[0].State));
+	}
+	return Record;
 }
 
 void AWorldDirectorFixtureBootstrap::DestroyCurrentTown()
@@ -3443,6 +3765,16 @@ void AWorldDirectorFixtureBootstrap::RunAutomatedDialogueCheck()
 
 void AWorldDirectorFixtureBootstrap::BeginAutomatedProjectCheck()
 {
+	// Projects are evaluated against real paths only once the town's navmesh is built.
+	if (UWorld* World = GetWorld(); World != nullptr &&
+		UNavigationSystemV1::IsNavigationBeingBuilt(World) && ProjectCheckNavigationRetryCount < 60)
+	{
+		++ProjectCheckNavigationRetryCount;
+		FTimerHandle TimerHandle;
+		GetWorldTimerManager().SetTimer(
+			TimerHandle, this, &AWorldDirectorFixtureBootstrap::BeginAutomatedProjectCheck, 1.0f, false);
+		return;
+	}
 	UTownSimulationSubsystem* Simulation = GetWorld()
 		? GetWorld()->GetSubsystem<UTownSimulationSubsystem>() : nullptr;
 	UChangeProjectSubsystem* Projects = GetWorld()
@@ -3733,6 +4065,13 @@ void AWorldDirectorFixtureBootstrap::RunAutomatedGenerationViabilityCheck()
 	const int32 LocationCount = CompiledTown ? CompiledTown->SpawnedLocations.Num() : 0;
 	const bool bPassed = Report.bValid && ResidentCount >= 20 && ResidentCount <= 30 &&
 		LocationCount >= 12 && LocationCount <= 18;
+	if (UDirectorBridgeSubsystem* Bridge = GetGameInstance()
+		? GetGameInstance()->GetSubsystem<UDirectorBridgeSubsystem>() : nullptr)
+	{
+		Bridge->RecordPlayability(BuildPlayabilityRecord(
+			!UNavigationSystemV1::IsNavigationBeingBuilt(GetWorld()),
+			static_cast<double>(AutomatedGenerationNavigationRetryCount)));
+	}
 	UE_LOG(LogWorldDirector, Display,
 		TEXT("WORLD_DIRECTOR_GENERATION_PLAYABLE_RESULT=%s mode=%s locations=%d residents=%d run=%s"),
 		bPassed ? TEXT("PASS") : TEXT("FAIL"),
@@ -3791,6 +4130,10 @@ bool AWorldDirectorFixtureBootstrap::CompileFixture()
 		!TerrainOverride.TrimStartAndEnd().IsEmpty())
 	{
 		Spec.Brief.TerrainPreferences = {TerrainOverride.TrimStartAndEnd()};
+		// brief.landform wins over prose, so a landform name overrides it directly and any
+		// other text falls back to the prose path.
+		Spec.Brief.Landform = FWorldDirectorPhysicalGenerator::TryParseLandform(TerrainOverride.TrimStartAndEnd(), nullptr)
+			? TerrainOverride.TrimStartAndEnd().ToLower() : FString();
 		UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_TERRAIN_OVERRIDE=%s"), *TerrainOverride);
 	}
 	FResolvedWorldPlan Plan;
@@ -3924,18 +4267,46 @@ void AWorldDirectorFixtureBootstrap::BeginAutomatedTravelCheck()
 		return;
 	}
 	Simulation->SetMinutesPerRealSecond(0.0f);
-	const int32 TargetMinute = 7 * 60 + 59;
-	const int32 MinutesToTarget = (TargetMinute - Simulation->GetMinuteOfDay() + 1440) % 1440;
-	Simulation->AdvanceSimulationMinutes(MinutesToTarget); // Resolve offscreen at home at 07:59.
-	TravelCheckStartLocations.Reset();
-	for (const AWorldDirectorResidentActor* Resident : CompiledTown->SpawnedResidents)
+	// Schedules follow occupation, so departures are spread across the morning.
+	// Test the morning hour at which the most residents change destination.
+	int32 TravelHour = 8;
+	int32 MostDepartures = -1;
+	for (int32 Hour = 6; Hour <= 9; ++Hour)
 	{
-		if (Resident != nullptr)
+		int32 Departures = 0;
+		for (const AWorldDirectorResidentActor* Resident : CompiledTown->SpawnedResidents)
 		{
-			TravelCheckStartLocations.Add(Resident->ResidentId, Resident->GetActorLocation());
+			Departures += Resident != nullptr && Resident->Schedule.ContainsByPredicate(
+				[Hour](const FWorldDirectorScheduleStop& Stop) { return Stop.Hour == Hour; }) ? 1 : 0;
+		}
+		if (Departures > MostDepartures)
+		{
+			MostDepartures = Departures;
+			TravelHour = Hour;
 		}
 	}
-	Simulation->AdvanceSimulationMinutes(1); // 08:00, issue real AI movement through the StateTree behavior path.
+	const int32 TargetMinute = TravelHour * 60 - 1;
+	const int32 MinutesToTarget = (TargetMinute - Simulation->GetMinuteOfDay() + 1440) % 1440;
+	Simulation->AdvanceSimulationMinutes(MinutesToTarget); // Resolve offscreen one minute before departure.
+	TravelCheckStartLocations.Reset();
+	TravelCheckDepartingResidents.Reset();
+	for (const AWorldDirectorResidentActor* Resident : CompiledTown->SpawnedResidents)
+	{
+		if (Resident == nullptr)
+		{
+			continue;
+		}
+		TravelCheckStartLocations.Add(Resident->ResidentId, Resident->GetActorLocation());
+		const FWorldDirectorScheduleStop* Departure = Resident->Schedule.FindByPredicate(
+			[TravelHour](const FWorldDirectorScheduleStop& Stop) { return Stop.Hour == TravelHour; });
+		if (Departure != nullptr && Departure->LocationId != Resident->IntendedLocationId)
+		{
+			TravelCheckDepartingResidents.Add(Resident->ResidentId);
+		}
+	}
+	UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_TRAVEL_PLAN hour=%d departing=%d"),
+		TravelHour, TravelCheckDepartingResidents.Num());
+	Simulation->AdvanceSimulationMinutes(1); // Departure hour: issue real AI movement through the StateTree path.
 	FTimerHandle TimerHandle;
 	GetWorldTimerManager().SetTimer(
 		TimerHandle, this, &AWorldDirectorFixtureBootstrap::FinishAutomatedTravelCheck, 10.0f, false);
@@ -3953,7 +4324,8 @@ void AWorldDirectorFixtureBootstrap::FinishAutomatedTravelCheck()
 			{
 				continue;
 			}
-			if (const FVector* Start = TravelCheckStartLocations.Find(Resident->ResidentId))
+			const FVector* Start = TravelCheckStartLocations.Find(Resident->ResidentId);
+			if (Start != nullptr && TravelCheckDepartingResidents.Contains(Resident->ResidentId))
 			{
 				MovedResidents += FVector::Dist2D(*Start, Resident->GetActorLocation()) >= 150.0f;
 			}
@@ -3961,10 +4333,12 @@ void AWorldDirectorFixtureBootstrap::FinishAutomatedTravelCheck()
 		}
 	}
 	const int32 Population = CompiledTown ? CompiledTown->SpawnedResidents.Num() : 0;
-	const bool bPassed = Population == 24 && MovedResidents >= 20 && RunningStateTrees == Population;
+	const int32 Departing = TravelCheckDepartingResidents.Num();
+	const bool bPassed = Population == 24 && Departing >= 3 &&
+		MovedResidents * 5 >= Departing * 4 && RunningStateTrees == Population;
 	UE_LOG(LogWorldDirector, Display,
-		TEXT("WORLD_DIRECTOR_TRAVEL_EVIDENCE residents=%d movedAtLeast150cm=%d runningStateTrees=%d"),
-		Population, MovedResidents, RunningStateTrees);
+		TEXT("WORLD_DIRECTOR_TRAVEL_EVIDENCE residents=%d departing=%d movedAtLeast150cm=%d runningStateTrees=%d"),
+		Population, Departing, MovedResidents, RunningStateTrees);
 	UE_LOG(LogWorldDirector, Display, TEXT("WORLD_DIRECTOR_TRAVEL_RESULT=%s"),
 		bPassed ? TEXT("PASS") : TEXT("FAIL"));
 	FGenericPlatformMisc::RequestExitWithStatus(false, bPassed ? 0 : 4);
@@ -3975,8 +4349,15 @@ void AWorldDirectorFixtureBootstrap::RunAutomatedVisualCapture()
 	if (UTownSimulationSubsystem* Simulation = GetWorld()
 		? GetWorld()->GetSubsystem<UTownSimulationSubsystem>() : nullptr)
 	{
+		// Captures default to noon for comparable lighting, but a world that chose its
+		// arrival time is shown at that time.
+		const bool bChoseTime = CompiledTown != nullptr &&
+			CompiledTown->GetCompiledPlan().Presentation.TimeOfDay != TEXT("dawn");
 		const int32 Noon = 12 * 60;
-		Simulation->AdvanceSimulationMinutes((Noon - Simulation->GetMinuteOfDay() + 1440) % 1440);
+		if (!bChoseTime)
+		{
+			Simulation->AdvanceSimulationMinutes((Noon - Simulation->GetMinuteOfDay() + 1440) % 1440);
+		}
 	}
 	UWorld* World = GetWorld();
 	APlayerController* PlayerController = World ? World->GetFirstPlayerController() : nullptr;
